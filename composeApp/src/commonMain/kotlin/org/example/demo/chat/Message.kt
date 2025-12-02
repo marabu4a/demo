@@ -12,6 +12,7 @@ data class Message(
 
 enum class MessageRole {
     USER,
-    ASSISTANT
+    ASSISTANT,
+    SYSTEM
 }
 

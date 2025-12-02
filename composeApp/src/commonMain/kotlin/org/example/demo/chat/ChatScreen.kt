@@ -26,6 +26,7 @@ fun ChatScreen(viewModel: ChatViewModel) {
     val errorMessage by viewModel.errorMessage
     val accessToken by viewModel.accessToken
     val isLoadingToken by viewModel.isLoadingToken
+    val useSystemRole by viewModel.useSystemRole
     
     var messageText by remember { mutableStateOf("") }
     var showAccessTokenDialog by remember { mutableStateOf(false) }
@@ -57,6 +58,19 @@ fun ChatScreen(viewModel: ChatViewModel) {
         TopAppBar(
             title = { Text("AI Chat Bot") },
             actions = {
+                IconButton(
+                    onClick = { viewModel.toggleSystemRole() },
+                    modifier = Modifier.padding(horizontal = 4.dp)
+                ) {
+                    Text(
+                        text = if (useSystemRole) "System" else "User",
+                        fontSize = 12.sp,
+                        color = if (useSystemRole) 
+                            MaterialTheme.colorScheme.primary 
+                        else 
+                            MaterialTheme.colorScheme.onSurface
+                    )
+                }
                 IconButton(onClick = { viewModel.clearChat() }) {
                     Text("Clear", fontSize = 12.sp)
                 }

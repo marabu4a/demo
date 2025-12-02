@@ -214,6 +214,7 @@ class OpenAIApiClient(
                     role = when (message.role) {
                         MessageRole.USER -> "user"
                         MessageRole.ASSISTANT -> "assistant"
+                        MessageRole.SYSTEM -> "system"
                     },
                     content = message.content
                 )
@@ -304,6 +305,7 @@ class OpenAIApiClient(
             
             val finishReason = response.choices.firstOrNull()?.finish_reason
             AppLogger.d(TAG, "Response content length: ${content.length}, finish_reason: $finishReason")
+            AppLogger.i(TAG, "Received AI message: $content")
             content
         } catch (e: Exception) {
             AppLogger.e(TAG, "Failed to get AI response: ${e.message}", e)

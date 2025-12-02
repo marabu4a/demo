@@ -28,6 +28,14 @@ class ChatViewModel(
     private val _isLoadingToken = mutableStateOf(false)
     val isLoadingToken: State<Boolean> = _isLoadingToken
     
+    private val _useSystemRole = mutableStateOf(false)
+    val useSystemRole: State<Boolean> = _useSystemRole
+    
+    fun toggleSystemRole() {
+        _useSystemRole.value = !_useSystemRole.value
+        AppLogger.d(TAG, "System role mode: ${_useSystemRole.value}")
+    }
+    
     fun setAccessToken(token: String, expiresAt: Long? = null) {
         _accessToken.value = token
         aiApiClient.setAccessToken(token, expiresAt)
@@ -64,7 +72,7 @@ class ChatViewModel(
         val userMessage = Message(
             id = generateId(),
             content = text.trim(),
-            role = MessageRole.USER
+            role = if (_useSystemRole.value) MessageRole.SYSTEM else MessageRole.USER
         )
         
         _session.value.messages.add(userMessage)
@@ -93,6 +101,7 @@ class ChatViewModel(
                 AppLogger.d(TAG, "Calling AI API with ${_session.value.messages.size} messages")
                 val response = aiApiClient.sendMessage(_session.value.messages)
                 AppLogger.d(TAG, "Received response from AI, length: ${response.length}")
+                AppLogger.i(TAG, "AI Response: $response")
                 
                 val assistantMessage = Message(
                     id = generateId(),
@@ -100,7 +109,7 @@ class ChatViewModel(
                     role = MessageRole.ASSISTANT
                 )
                 _session.value.messages.add(assistantMessage)
-                AppLogger.i(TAG, "Message successfully processed")
+                AppLogger.i(TAG, "Message successfully processed and added to session")
             } catch (e: Exception) {
                 val errorMsg = e.message ?: "Failed to get response"
                 AppLogger.e(TAG, "Error sending message: $errorMsg", e)
