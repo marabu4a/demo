@@ -15,7 +15,7 @@ import kotlinx.serialization.json.Json
 import kotlin.random.Random
 
 interface AiApiClient {
-    suspend fun sendMessage(messages: List<Message>): String
+    suspend fun sendMessage(messages: List<Message>, temperature: Float = 0.0f): String
     suspend fun getAccessToken(authorizationKey: String): String
 }
 
@@ -63,7 +63,8 @@ class OpenAIApiClient(
         val model: String,
         val messages: List<ChatMessage>,
         val stream: Boolean = false,
-        val repetition_penalty: Double = 1.0
+        val repetition_penalty: Double = 1.0,
+        val temperature: Float = 0.0f
     )
     
     @Serializable
@@ -201,13 +202,13 @@ class OpenAIApiClient(
         }
     }
     
-    override suspend fun sendMessage(messages: List<Message>): String = withContext(Dispatchers.Default) {
+    override suspend fun sendMessage(messages: List<Message>, temperature: Float): String = withContext(Dispatchers.Default) {
         try {
             // Проверяем и обновляем токен при необходимости
             refreshTokenIfNeeded()
             
             AppLogger.d(TAG, "Sending message to API: $API_URL")
-            AppLogger.d(TAG, "Messages count: ${messages.size}")
+            AppLogger.d(TAG, "Messages count: ${messages.size}, temperature: $temperature")
             
             val chatMessages = messages.map { message ->
                 ChatMessage(
@@ -224,7 +225,8 @@ class OpenAIApiClient(
                 model = MODEL,
                 messages = chatMessages,
                 stream = false,
-                repetition_penalty = 1.0
+                repetition_penalty = 1.0,
+                temperature = temperature
             )
             
             AppLogger.d(TAG, "Request body: model=$MODEL, messages=${chatMessages.size}, stream=false")
@@ -259,7 +261,7 @@ class OpenAIApiClient(
                                 refreshTokenIfNeeded()
                                 // Повторяем запрос с новым токеном
                                 AppLogger.d(TAG, "Retrying request with refreshed token")
-                                return@withContext sendMessage(messages)
+                                return@withContext sendMessage(messages, temperature)
                             } catch (refreshError: Exception) {
                                 AppLogger.e(TAG, "Failed to refresh token", refreshError)
                                 throw Exception("Unauthorized: Invalid access token and failed to refresh")

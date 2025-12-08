@@ -31,9 +31,17 @@ class ChatViewModel(
     private val _useSystemRole = mutableStateOf(false)
     val useSystemRole: State<Boolean> = _useSystemRole
     
+    private val _temperature = mutableStateOf(0.0f)
+    val temperature: State<Float> = _temperature
+    
     fun toggleSystemRole() {
         _useSystemRole.value = !_useSystemRole.value
         AppLogger.d(TAG, "System role mode: ${_useSystemRole.value}")
+    }
+    
+    fun setTemperature(value: Float) {
+        _temperature.value = value
+        AppLogger.d(TAG, "Temperature set to: $value")
     }
     
     fun setAccessToken(token: String, expiresAt: Long? = null) {
@@ -98,8 +106,8 @@ class ChatViewModel(
                     }
                 }
                 
-                AppLogger.d(TAG, "Calling AI API with ${_session.value.messages.size} messages")
-                val response = aiApiClient.sendMessage(_session.value.messages)
+                AppLogger.d(TAG, "Calling AI API with ${_session.value.messages.size} messages, temperature: ${_temperature.value}")
+                val response = aiApiClient.sendMessage(_session.value.messages, _temperature.value)
                 AppLogger.d(TAG, "Received response from AI, length: ${response.length}")
                 AppLogger.i(TAG, "AI Response: $response")
                 

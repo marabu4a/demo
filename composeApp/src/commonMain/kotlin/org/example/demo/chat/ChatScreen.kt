@@ -27,9 +27,11 @@ fun ChatScreen(viewModel: ChatViewModel) {
     val accessToken by viewModel.accessToken
     val isLoadingToken by viewModel.isLoadingToken
     val useSystemRole by viewModel.useSystemRole
+    val temperature by viewModel.temperature
     
     var messageText by remember { mutableStateOf("") }
     var showAccessTokenDialog by remember { mutableStateOf(false) }
+    var showTemperatureDialog by remember { mutableStateOf(false) }
     val listState = rememberLazyListState()
     val scope = rememberCoroutineScope()
     
@@ -58,6 +60,19 @@ fun ChatScreen(viewModel: ChatViewModel) {
         TopAppBar(
             title = { Text("AI Chat Bot") },
             actions = {
+                IconButton(
+                    onClick = { showTemperatureDialog = true },
+                    modifier = Modifier.padding(horizontal = 4.dp)
+                ) {
+                    Text(
+                        text = "T: ${String.format("%.1f", temperature)}",
+                        fontSize = 12.sp,
+                        color = if (temperature != 0.0f) 
+                            MaterialTheme.colorScheme.primary 
+                        else 
+                            MaterialTheme.colorScheme.onSurface
+                    )
+                }
                 IconButton(
                     onClick = { viewModel.toggleSystemRole() },
                     modifier = Modifier.padding(horizontal = 4.dp)
@@ -187,6 +202,18 @@ fun ChatScreen(viewModel: ChatViewModel) {
         )
     }
     
+    // Диалог для настройки Temperature
+    if (showTemperatureDialog) {
+        TemperatureDialog(
+            currentTemperature = temperature,
+            onDismiss = { showTemperatureDialog = false },
+            onConfirm = { value ->
+                viewModel.setTemperature(value)
+                showTemperatureDialog = false
+            }
+        )
+    }
+    
     // Показ ошибок
     errorMessage?.let { error ->
         AlertDialog(
@@ -212,6 +239,8 @@ fun MessageBubble(message: Message, isLoading: Boolean = false) {
     ) {
         Box(
             modifier = Modifier
+                .fillMaxWidth(fraction = 0.75f)
+                .widthIn(min = 200.dp, max = 800.dp)
                 .clip(
                     RoundedCornerShape(
                         topStart = 16.dp,
@@ -225,7 +254,6 @@ fun MessageBubble(message: Message, isLoading: Boolean = false) {
                     else MaterialTheme.colorScheme.surfaceVariant
                 )
                 .padding(12.dp)
-                .widthIn(max = 280.dp)
         ) {
             if (isLoading) {
                 CircularProgressIndicator(
@@ -302,6 +330,74 @@ fun AccessTokenDialog(
             TextButton(
                 onClick = { onConfirmToken(accessTokenText) },
                 enabled = accessTokenText.isNotBlank() && !isLoadingToken
+            ) {
+                Text("Save")
+            }
+        },
+        dismissButton = {
+            TextButton(onClick = onDismiss) {
+                Text("Cancel")
+            }
+        }
+    )
+}
+
+@Composable
+fun TemperatureDialog(
+    currentTemperature: Float,
+    onDismiss: () -> Unit,
+    onConfirm: (Float) -> Unit
+) {
+    var temperatureText by remember(currentTemperature) { mutableStateOf(currentTemperature.toString()) }
+    var errorMessage by remember { mutableStateOf<String?>(null) }
+    
+    // Обновляем текст при изменении currentTemperature
+    LaunchedEffect(currentTemperature) {
+        temperatureText = currentTemperature.toString()
+    }
+    
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("Temperature") },
+        text = {
+            Column {
+                Text(
+                    "Temperature controls the randomness of the AI's responses. " +
+                    "Lower values (0.0-0.5) make responses more focused and deterministic. " +
+                    "Higher values (0.5-2.0) make responses more creative and diverse.",
+                    style = MaterialTheme.typography.bodyMedium
+                )
+                Spacer(modifier = Modifier.height(16.dp))
+                
+                OutlinedTextField(
+                    value = temperatureText,
+                    onValueChange = { 
+                        temperatureText = it
+                        errorMessage = null
+                    },
+                    modifier = Modifier.fillMaxWidth(),
+                    placeholder = { Text("0.0") },
+                    label = { Text("Temperature (0.0 - 2.0)") },
+                    singleLine = true,
+                    isError = errorMessage != null,
+                    supportingText = errorMessage?.let { { Text(it) } }
+                )
+            }
+        },
+        confirmButton = {
+            TextButton(
+                onClick = {
+                    val value = temperatureText.toFloatOrNull()
+                    if (value != null) {
+                        if (value in 0.0f..2.0f) {
+                            onConfirm(value)
+                        } else {
+                            errorMessage = "Temperature must be between 0.0 and 2.0"
+                        }
+                    } else {
+                        errorMessage = "Please enter a valid number"
+                    }
+                }
             ) {
                 Text("Save")
             }
