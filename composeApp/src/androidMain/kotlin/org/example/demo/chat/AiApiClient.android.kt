@@ -25,10 +25,13 @@ actual fun createHttpClient(): HttpClient {
     val sslContext = SSLContext.getInstance("SSL")
     sslContext.init(null, trustAllCerts, java.security.SecureRandom())
     
-    // Настраиваем OkHttp клиент
+    // Настраиваем OkHttp клиент с увеличенными таймаутами
     val okHttpClient = OkHttpClient.Builder()
         .sslSocketFactory(sslContext.socketFactory, trustAllCerts[0] as X509TrustManager)
         .hostnameVerifier { _, _ -> true }
+        .connectTimeout(60, java.util.concurrent.TimeUnit.SECONDS) // Таймаут на установку соединения: 60 секунд
+        .readTimeout(120, java.util.concurrent.TimeUnit.SECONDS) // Таймаут на чтение ответа: 120 секунд (важно для AI запросов)
+        .writeTimeout(60, java.util.concurrent.TimeUnit.SECONDS) // Таймаут на отправку запроса: 60 секунд
         .build()
     
     return HttpClient(OkHttp) {

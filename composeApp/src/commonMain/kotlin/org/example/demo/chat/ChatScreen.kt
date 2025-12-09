@@ -5,9 +5,11 @@ import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
@@ -28,10 +30,13 @@ fun ChatScreen(viewModel: ChatViewModel) {
     val isLoadingToken by viewModel.isLoadingToken
     val useSystemRole by viewModel.useSystemRole
     val temperature by viewModel.temperature
+    val selectedModel by viewModel.selectedModel
+    val huggingFaceToken by viewModel.huggingFaceToken
     
     var messageText by remember { mutableStateOf("") }
     var showAccessTokenDialog by remember { mutableStateOf(false) }
     var showTemperatureDialog by remember { mutableStateOf(false) }
+    var showModelDialog by remember { mutableStateOf(false) }
     val listState = rememberLazyListState()
     val scope = rememberCoroutineScope()
     
@@ -60,6 +65,16 @@ fun ChatScreen(viewModel: ChatViewModel) {
         TopAppBar(
             title = { Text("AI Chat Bot") },
             actions = {
+                TextButton(
+                    onClick = { showModelDialog = true },
+                    modifier = Modifier.padding(horizontal = 4.dp)
+                ) {
+                    Text(
+                        text = selectedModel.displayName,
+                        fontSize = 12.sp,
+                        color = MaterialTheme.colorScheme.primary
+                    )
+                }
                 IconButton(
                     onClick = { showTemperatureDialog = true },
                     modifier = Modifier.padding(horizontal = 4.dp)
@@ -214,12 +229,38 @@ fun ChatScreen(viewModel: ChatViewModel) {
         )
     }
     
+    // Диалог для выбора модели
+    if (showModelDialog) {
+        ModelSelectionDialog(
+            currentModel = selectedModel,
+            onDismiss = { showModelDialog = false },
+            onSelectModel = { model ->
+                viewModel.setSelectedModel(model)
+                showModelDialog = false
+            }
+        )
+    }
+    
     // Показ ошибок
     errorMessage?.let { error ->
         AlertDialog(
             onDismissRequest = { viewModel.dismissError() },
             title = { Text("Error") },
-            text = { Text(error) },
+            text = {
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .heightIn(max = 400.dp)
+                ) {
+                    val scrollState = rememberScrollState()
+                    Text(
+                        text = error,
+                        modifier = Modifier
+                            .verticalScroll(scrollState)
+                            .fillMaxWidth()
+                    )
+                }
+            },
             confirmButton = {
                 TextButton(onClick = { viewModel.dismissError() }) {
                     Text("OK")
@@ -237,40 +278,97 @@ fun MessageBubble(message: Message, isLoading: Boolean = false) {
         modifier = Modifier.fillMaxWidth(),
         horizontalArrangement = if (isUser) Arrangement.End else Arrangement.Start
     ) {
-        Box(
+        Column(
             modifier = Modifier
                 .fillMaxWidth(fraction = 0.75f)
                 .widthIn(min = 200.dp, max = 800.dp)
-                .clip(
-                    RoundedCornerShape(
-                        topStart = 16.dp,
-                        topEnd = 16.dp,
-                        bottomStart = if (isUser) 16.dp else 4.dp,
-                        bottomEnd = if (isUser) 4.dp else 16.dp
-                    )
-                )
-                .background(
-                    if (isUser) MaterialTheme.colorScheme.primary
-                    else MaterialTheme.colorScheme.surfaceVariant
-                )
-                .padding(12.dp)
         ) {
-            if (isLoading) {
-                CircularProgressIndicator(
-                    modifier = Modifier.size(20.dp),
-                    strokeWidth = 2.dp
-                )
-            } else {
-                Text(
-                    text = message.content,
-                    style = MaterialTheme.typography.bodyMedium,
-                    color = if (isUser) 
-                        MaterialTheme.colorScheme.onPrimary 
-                    else 
-                        MaterialTheme.colorScheme.onSurfaceVariant
-                )
+            Box(
+                modifier = Modifier
+                    .clip(
+                        RoundedCornerShape(
+                            topStart = 16.dp,
+                            topEnd = 16.dp,
+                            bottomStart = if (isUser) 16.dp else 4.dp,
+                            bottomEnd = if (isUser) 4.dp else 16.dp
+                        )
+                    )
+                    .background(
+                        if (isUser) MaterialTheme.colorScheme.primary
+                        else MaterialTheme.colorScheme.surfaceVariant
+                    )
+                    .padding(12.dp)
+            ) {
+                if (isLoading) {
+                    CircularProgressIndicator(
+                        modifier = Modifier.size(20.dp),
+                        strokeWidth = 2.dp
+                    )
+                } else {
+                    Text(
+                        text = message.content,
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = if (isUser) 
+                            MaterialTheme.colorScheme.onPrimary 
+                        else 
+                            MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+            }
+            
+            // Отображаем время ответа и информацию о токенах для сообщений от ассистента
+            if (!isUser && !isLoading) {
+                Column(
+                    modifier = Modifier.padding(start = 4.dp, top = 4.dp)
+                ) {
+                    if (message.responseTimeMs != null) {
+                        Text(
+                            text = formatResponseTime(message.responseTimeMs),
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
+                    
+                    // Отображаем информацию о токенах, если доступна
+                    if (message.promptTokens != null || message.completionTokens != null || message.totalTokens != null) {
+                        Row(
+                            horizontalArrangement = Arrangement.spacedBy(8.dp),
+                            modifier = Modifier.padding(top = 2.dp)
+                        ) {
+                            message.promptTokens?.let { tokens ->
+                                Text(
+                                    text = "Prompt: $tokens",
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.7f)
+                                )
+                            }
+                            message.completionTokens?.let { tokens ->
+                                Text(
+                                    text = "Completion: $tokens",
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.7f)
+                                )
+                            }
+                            message.totalTokens?.let { tokens ->
+                                Text(
+                                    text = "Total: $tokens",
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.7f)
+                                )
+                            }
+                        }
+                    }
+                }
             }
         }
+    }
+}
+
+private fun formatResponseTime(timeMs: Long): String {
+    return when {
+        timeMs < 1000 -> "${timeMs}ms"
+        timeMs < 60000 -> String.format("%.1fs", timeMs / 1000.0)
+        else -> String.format("%.1fmin", timeMs / 60000.0)
     }
 }
 
@@ -396,6 +494,122 @@ fun TemperatureDialog(
                         }
                     } else {
                         errorMessage = "Please enter a valid number"
+                    }
+                }
+            ) {
+                Text("Save")
+            }
+        },
+        dismissButton = {
+            TextButton(onClick = onDismiss) {
+                Text("Cancel")
+            }
+        }
+    )
+}
+
+@Composable
+fun ModelSelectionDialog(
+    currentModel: AiModel,
+    onDismiss: () -> Unit,
+    onSelectModel: (AiModel) -> Unit
+) {
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("Select AI Model") },
+        text = {
+            Column(
+                modifier = Modifier.fillMaxWidth(),
+                verticalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                AiModel.ALL_MODELS.forEach { model ->
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(vertical = 4.dp),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Column(modifier = Modifier.weight(1f)) {
+                            Text(
+                                text = model.displayName,
+                                style = MaterialTheme.typography.bodyLarge
+                            )
+                            Text(
+                                text = when (model.type) {
+                                    AiModelType.GIGACHAT -> "Sberbank GigaChat"
+                                    AiModelType.HUGGINGFACE -> "HuggingFace Inference API"
+                                },
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                        }
+                        RadioButton(
+                            selected = model == currentModel,
+                            onClick = { onSelectModel(model) }
+                        )
+                    }
+                    if (model != AiModel.ALL_MODELS.last()) {
+                        HorizontalDivider()
+                    }
+                }
+            }
+        },
+        confirmButton = {
+            TextButton(onClick = onDismiss) {
+                Text("Close")
+            }
+        }
+    )
+}
+
+@Composable
+fun HuggingFaceTokenDialog(
+    currentToken: String,
+    onDismiss: () -> Unit,
+    onConfirm: (String) -> Unit
+) {
+    var tokenText by remember(currentToken) { mutableStateOf(currentToken) }
+    var errorMessage by remember { mutableStateOf<String?>(null) }
+    
+    LaunchedEffect(currentToken) {
+        tokenText = currentToken
+    }
+    
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("HuggingFace API Token") },
+        text = {
+            Column {
+                Text(
+                    "To use HuggingFace models, you need an API token. " +
+                    "You can get one for free at https://huggingface.co/settings/tokens",
+                    style = MaterialTheme.typography.bodyMedium
+                )
+                Spacer(modifier = Modifier.height(16.dp))
+                
+                OutlinedTextField(
+                    value = tokenText,
+                    onValueChange = { 
+                        tokenText = it
+                        errorMessage = null
+                    },
+                    modifier = Modifier.fillMaxWidth(),
+                    placeholder = { Text("Enter your HuggingFace API token...") },
+                    label = { Text("API Token") },
+                    singleLine = true,
+                    isError = errorMessage != null,
+                    supportingText = errorMessage?.let { { Text(it) } }
+                )
+            }
+        },
+        confirmButton = {
+            TextButton(
+                onClick = {
+                    if (tokenText.isNotBlank()) {
+                        onConfirm(tokenText.trim())
+                    } else {
+                        errorMessage = "Token cannot be empty"
                     }
                 }
             ) {

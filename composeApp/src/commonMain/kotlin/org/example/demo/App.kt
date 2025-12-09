@@ -10,8 +10,8 @@ import org.jetbrains.compose.ui.tooling.preview.Preview
 fun App() {
     MaterialTheme {
         val httpClient = remember { createHttpClient() }
-        val aiApiClient = remember { OpenAIApiClient(httpClient) }
-        val viewModel = remember { ChatViewModel(aiApiClient) }
+        val apiClientManager = remember { AiApiClientManager(httpClient) }
+        val viewModel = remember { ChatViewModel(apiClientManager) }
         
         ChatScreen(viewModel = viewModel)
     }

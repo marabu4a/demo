@@ -12,17 +12,21 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.JsonIgnoreUnknownKeys
 import kotlin.random.Random
 
 interface AiApiClient {
     suspend fun sendMessage(messages: List<Message>, temperature: Float = 0.0f): String
     suspend fun getAccessToken(authorizationKey: String): String
+    val model: AiModel
 }
 
 // Реализация для AI API (GigaChat/OpenAI)
-class OpenAIApiClient(
+class GigaChatApiClient(
     private val httpClient: HttpClient
 ) : AiApiClient {
+    
+    override val model: AiModel = AiModel.GIGACHAT
     
     private var accessToken: String = ""
     private var tokenExpiresAt: Long? = null
@@ -52,7 +56,7 @@ class OpenAIApiClient(
     companion object {
         private const val API_URL = "https://gigachat.devices.sberbank.ru/api/v1/chat/completions"
         private const val OAUTH_URL = "https://ngw.devices.sberbank.ru:9443/api/v2/oauth"
-        private const val TAG = "AiApiClient"
+        private const val TAG = "GigaChatApiClient"
         private const val MODEL = "GigaChat"
         
         private const val AUTHORIZATION_KEY = "MDE5YWRhYTktNmIxZi03M2QyLWIzODctOTQ4NWIzOTdhNTVmOjI0MGY0MzcxLTc2ZWYtNGMzMC04YTk5LTFkYjA1ZjgwNWQ1NQ=="
@@ -154,15 +158,15 @@ class OpenAIApiClient(
                         "Unable to read error body: ${e.message}"
                     }
                     
-                    AppLogger.e(TAG, "OAuth HTTP error $statusCode. Response body: ${errorBody.take(500)}")
+                    AppLogger.e(TAG, "OAuth HTTP error $statusCode. Response body: $errorBody")
                     AppLogger.e(TAG, "Request URL: $OAUTH_URL")
                     AppLogger.e(TAG, "Request body: scope=GIGACHAT_API_PERS")
                     AppLogger.e(TAG, "Authorization header: Basic ${authorizationKey.take(30)}...")
                     
                     when (statusCode) {
-                        401 -> throw Exception("Unauthorized: Invalid authorization key. Check if the key is correct.")
-                        403 -> throw Exception("Forbidden: Access denied. Check your authorization key")
-                        400 -> throw Exception("Bad Request: Invalid request format. Response: $errorBody. Check if scope parameter and Authorization format are correct.")
+                        401 -> throw Exception("Unauthorized ($statusCode): $errorBody")
+                        403 -> throw Exception("Forbidden ($statusCode): $errorBody")
+                        400 -> throw Exception("Bad Request ($statusCode): $errorBody")
                         else -> throw Exception("HTTP $statusCode: $errorBody")
                     }
                 }
@@ -251,7 +255,7 @@ class OpenAIApiClient(
                         "Unable to read error body: ${e.message}"
                     }
                     
-                    AppLogger.e(TAG, "HTTP error $statusCode. Response body: ${errorBody.take(500)}")
+                    AppLogger.e(TAG, "HTTP error $statusCode. Response body: $errorBody")
                     
                     when (statusCode) {
                         401 -> {
@@ -264,12 +268,12 @@ class OpenAIApiClient(
                                 return@withContext sendMessage(messages, temperature)
                             } catch (refreshError: Exception) {
                                 AppLogger.e(TAG, "Failed to refresh token", refreshError)
-                                throw Exception("Unauthorized: Invalid access token and failed to refresh")
+                                throw Exception("Unauthorized ($statusCode): $errorBody")
                             }
                         }
-                        403 -> throw Exception("Forbidden: Access denied. Check your access token and API endpoint")
-                        404 -> throw Exception("Not Found: API endpoint not found. Check the URL: $API_URL")
-                        429 -> throw Exception("Too Many Requests: Rate limit exceeded")
+                        403 -> throw Exception("Forbidden ($statusCode): $errorBody")
+                        404 -> throw Exception("Not Found ($statusCode): $errorBody")
+                        429 -> throw Exception("Too Many Requests ($statusCode): $errorBody")
                         500, 502, 503, 504 -> throw Exception("Server Error ($statusCode): $errorBody")
                         else -> throw Exception("HTTP $statusCode: $errorBody")
                     }
@@ -334,6 +338,248 @@ class OpenAIApiClient(
         
         return uuid.toString()
     }
+}
+
+// Реализация для HuggingFace Inference API
+class HuggingFaceApiClient(
+    private val httpClient: HttpClient,
+    model: AiModel,
+    private var apiToken: String = ""
+) : AiApiClient {
+    
+    override val model: AiModel = model
+    
+    // Сохраняем последнюю информацию об использовании токенов
+    private var lastUsage: HuggingFaceUsage? = null
+    
+    companion object {
+        private const val TAG = "HuggingFaceApiClient"
+        // Встроенный токен для HuggingFace API
+        // Замените на ваш токен или оставьте пустым для ручного ввода
+        private const val HUGGINGFACE_API_TOKEN = "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"
+    }
+    
+    fun setApiToken(token: String) {
+        apiToken = token
+        AppLogger.d(TAG, "API token set for model: ${model.name}")
+    }
+    
+    fun getLastUsage(): HuggingFaceUsage? = lastUsage
+    
+    override suspend fun getAccessToken(authorizationKey: String): String {
+        // HuggingFace использует API токен напрямую, не требует OAuth
+        // Если передан пустой ключ, используем встроенный токен
+        val token = if (authorizationKey.isNotBlank()) {
+            authorizationKey
+        } else {
+            HUGGINGFACE_API_TOKEN
+        }
+        setApiToken(token)
+        return token
+    }
+    
+    suspend fun getAccessToken(): String {
+        // Используем встроенный токен или возвращаем пустую строку
+        val token = HUGGINGFACE_API_TOKEN
+        if (token.isNotBlank()) {
+            setApiToken(token)
+        }
+        return token
+    }
+    
+    @Serializable
+    data class HuggingFaceMessage(
+        val role: String,
+        val content: String
+    )
+    
+    @Serializable
+    data class HuggingFaceRequest(
+        val messages: List<HuggingFaceMessage>,
+        val model: String,
+        val stream: Boolean = false
+        //val parameters: HuggingFaceParameters? = null
+    )
+    
+    @Serializable
+    data class HuggingFaceParameters(
+        val temperature: Float? = null,
+        val max_new_tokens: Int? = null,
+        val return_full_text: Boolean = false
+    )
+    
+    @Serializable
+    data class HuggingFaceResponse(
+        val generated_text: String? = null
+    )
+    
+    @Serializable
+    @JsonIgnoreUnknownKeys
+    data class HuggingFaceChatCompletionResponse(
+        val id: String? = null,
+        val `object`: String? = null,
+        val created: Long? = null,
+        val model: String? = null,
+        val choices: List<HuggingFaceChoice>? = null,
+        val usage: HuggingFaceUsage? = null,
+        val system_fingerprint: String? = null
+    )
+    
+    @Serializable
+    data class HuggingFaceChoice(
+        val index: Int? = null,
+        val message: HuggingFaceMessage? = null,
+        val finish_reason: String? = null
+    )
+    
+    @Serializable
+    @JsonIgnoreUnknownKeys
+    data class HuggingFaceUsage(
+        val prompt_tokens: Int? = null,
+        val completion_tokens: Int? = null,
+        val total_tokens: Int? = null,
+    )
+    
+    override suspend fun sendMessage(messages: List<Message>, temperature: Float): String = withContext(Dispatchers.Default) {
+        try {
+            if (apiToken.isBlank()) {
+                throw Exception("HuggingFace API token is required. Please set it in settings.")
+            }
+            
+            AppLogger.d(TAG, "Sending message to HuggingFace API: ${model.apiUrl}")
+            AppLogger.d(TAG, "Messages count: ${messages.size}, temperature: $temperature")
+            
+            // Преобразуем сообщения в формат HuggingFace
+            val hfMessages = messages.map { msg ->
+                HuggingFaceMessage(
+                    role = when (msg.role) {
+                        MessageRole.USER -> "user"
+                        MessageRole.ASSISTANT -> "assistant"
+                        MessageRole.SYSTEM -> "system"
+                    },
+                    content = msg.content
+                )
+            }
+            
+            val request = HuggingFaceRequest(
+                messages = hfMessages,
+                model = model.name,
+                stream = false
+                //parameters = null
+            )
+            
+            AppLogger.d(TAG, "Request body: model=${model.name}, messages count=${hfMessages.size}")
+            
+            val response: String = try {
+                val httpResponse = httpClient.post(model.apiUrl ?: "") {
+                    header(HttpHeaders.Authorization, "Bearer $apiToken")
+                    header(HttpHeaders.ContentType, ContentType.Application.Json)
+                    header(HttpHeaders.Accept, ContentType.Application.Json)
+                    setBody(request)
+                }
+                
+                val statusCode = httpResponse.status.value
+                val contentType = httpResponse.headers[HttpHeaders.ContentType]
+                AppLogger.d(TAG, "Response status: $statusCode, Content-Type: $contentType")
+                
+                if (statusCode !in 200..299) {
+                    val errorBody = try {
+                        httpResponse.body<String>()
+                    } catch (e: Exception) {
+                        "Unable to read error body: ${e.message}"
+                    }
+                    
+                    AppLogger.e(TAG, "HTTP error $statusCode. Response body: $errorBody")
+                    
+                    when (statusCode) {
+                        401 -> throw Exception("Unauthorized ($statusCode): $errorBody")
+                        403 -> throw Exception("Forbidden ($statusCode): $errorBody")
+                        404 -> throw Exception("Not Found ($statusCode): $errorBody")
+                        429 -> throw Exception("Too Many Requests ($statusCode): $errorBody")
+                        503 -> throw Exception("Service Unavailable ($statusCode): $errorBody")
+                        500, 502, 504 -> throw Exception("Server Error ($statusCode): $errorBody")
+                        else -> throw Exception("HTTP $statusCode: $errorBody")
+                    }
+                }
+                
+                // HuggingFace всегда возвращает JSON в формате chat.completion
+                val responseText = httpResponse.body<String>()
+                AppLogger.d(TAG, "Raw response length: ${responseText.length}, Content-Type: $contentType")
+                
+                // Полностью парсим ответ в структуру данных
+                // Используем Json с ignoreUnknownKeys = true для игнорирования неизвестных полей
+                val jsonParser = Json {
+                    ignoreUnknownKeys = true
+                    isLenient = true
+                    encodeDefaults = false
+                }
+                
+                val chatCompletion: HuggingFaceChatCompletionResponse = try {
+                    jsonParser.decodeFromString<HuggingFaceChatCompletionResponse>(responseText)
+                } catch (e: Exception) {
+                    AppLogger.e(TAG, "Failed to parse HuggingFace response: ${e.message}", e)
+                    throw Exception("Failed to parse HuggingFace response: ${e.message}. Response: ${responseText.take(500)}")
+                }
+                
+                // Логируем информацию о распарсенном ответе
+                AppLogger.d(TAG, "Parsed response: id=${chatCompletion.id}, model=${chatCompletion.model}, object=${chatCompletion.`object`}")
+                AppLogger.d(TAG, "Choices count: ${chatCompletion.choices?.size ?: 0}")
+                
+                // Сохраняем информацию об использовании токенов
+                lastUsage = chatCompletion.usage
+                
+                // Логируем информацию об использовании токенов, если доступна
+                chatCompletion.usage?.let { usage ->
+                    AppLogger.d(TAG, "Token usage: prompt=${usage.prompt_tokens}, completion=${usage.completion_tokens}, total=${usage.total_tokens}")
+                }
+                
+                // Извлекаем content из первого choice для отображения
+                val content = chatCompletion.choices?.firstOrNull()?.message?.content
+                if (content != null) {
+                    AppLogger.d(TAG, "Extracted content from response, length: ${content.length}")
+                    return@withContext content
+                } else {
+                    throw Exception("No content found in chat.completion response. Choices: ${chatCompletion.choices?.size ?: 0}")
+                }
+            } catch (httpException: Exception) {
+                AppLogger.e(TAG, "HTTP request failed", httpException)
+                throw httpException
+            }
+            
+            AppLogger.d(TAG, "Response received, length: ${response.length}")
+            AppLogger.i(TAG, "Received AI message: $response")
+            response.trim()
+        } catch (e: Exception) {
+            AppLogger.e(TAG, "Failed to get AI response: ${e.message}", e)
+            throw Exception("Failed to get AI response: ${e.message}", e)
+        }
+    }
+}
+
+// Менеджер для переключения между API клиентами
+class AiApiClientManager(
+    private val httpClient: HttpClient
+) {
+    private var currentClient: AiApiClient? = null
+    private val clients = mutableMapOf<AiModel, AiApiClient>()
+    
+    fun getClient(model: AiModel): AiApiClient {
+        if (currentClient?.model == model) {
+            return currentClient!!
+        }
+        
+        val client = clients.getOrPut(model) {
+            when (model.type) {
+                AiModelType.GIGACHAT -> GigaChatApiClient(httpClient)
+                AiModelType.HUGGINGFACE -> HuggingFaceApiClient(httpClient, model)
+            }
+        }
+        
+        currentClient = client
+        return client
+    }
+    
+    fun getCurrentClient(): AiApiClient? = currentClient
 }
 
 // Фабрика для создания HTTP клиента
