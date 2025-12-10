@@ -30,12 +30,14 @@ fun ChatScreen(viewModel: ChatViewModel) {
     val isLoadingToken by viewModel.isLoadingToken
     val useSystemRole by viewModel.useSystemRole
     val temperature by viewModel.temperature
+    val maxTokens by viewModel.maxTokens
     val selectedModel by viewModel.selectedModel
     val huggingFaceToken by viewModel.huggingFaceToken
     
     var messageText by remember { mutableStateOf("") }
     var showAccessTokenDialog by remember { mutableStateOf(false) }
     var showTemperatureDialog by remember { mutableStateOf(false) }
+    var showMaxTokensDialog by remember { mutableStateOf(false) }
     var showModelDialog by remember { mutableStateOf(false) }
     val listState = rememberLazyListState()
     val scope = rememberCoroutineScope()
@@ -88,6 +90,22 @@ fun ChatScreen(viewModel: ChatViewModel) {
                             MaterialTheme.colorScheme.onSurface
                     )
                 }
+                // Показываем кнопку maxTokens только для HuggingFace моделей
+                if (selectedModel.type == AiModelType.HUGGINGFACE) {
+                    IconButton(
+                        onClick = { showMaxTokensDialog = true },
+                        modifier = Modifier.padding(horizontal = 4.dp)
+                    ) {
+                        Text(
+                            text = maxTokens?.let { "Max: $it" } ?: "Max: ∞",
+                            fontSize = 12.sp,
+                            color = if (maxTokens != null) 
+                                MaterialTheme.colorScheme.primary 
+                            else 
+                                MaterialTheme.colorScheme.onSurface
+                        )
+                    }
+                }
                 IconButton(
                     onClick = { viewModel.toggleSystemRole() },
                     modifier = Modifier.padding(horizontal = 4.dp)
@@ -134,8 +152,16 @@ fun ChatScreen(viewModel: ChatViewModel) {
                 }
             }
             
-            items(session.messages) { message ->
-                MessageBubble(message = message)
+            items(session.messages.size) { index ->
+                val message = session.messages[index]
+                // Находим предыдущее сообщение от ассистента для анализа изменений токенов
+                val previousAssistantMessage = session.messages
+                    .take(index)
+                    .lastOrNull { it.role == MessageRole.ASSISTANT && it.totalTokens != null }
+                MessageBubble(
+                    message = message,
+                    previousMessage = previousAssistantMessage
+                )
             }
             
             if (isLoading) {
@@ -229,6 +255,18 @@ fun ChatScreen(viewModel: ChatViewModel) {
         )
     }
     
+    // Диалог для настройки Max Tokens (только для HuggingFace)
+    if (showMaxTokensDialog) {
+        MaxTokensDialog(
+            currentMaxTokens = maxTokens,
+            onDismiss = { showMaxTokensDialog = false },
+            onConfirm = { value ->
+                viewModel.setMaxTokens(value)
+                showMaxTokensDialog = false
+            }
+        )
+    }
+    
     // Диалог для выбора модели
     if (showModelDialog) {
         ModelSelectionDialog(
@@ -271,7 +309,7 @@ fun ChatScreen(viewModel: ChatViewModel) {
 }
 
 @Composable
-fun MessageBubble(message: Message, isLoading: Boolean = false) {
+fun MessageBubble(message: Message, isLoading: Boolean = false, previousMessage: Message? = null) {
     val isUser = message.role == MessageRole.USER
     
     Row(
@@ -329,32 +367,76 @@ fun MessageBubble(message: Message, isLoading: Boolean = false) {
                         )
                     }
                     
-                    // Отображаем информацию о токенах, если доступна
+                    // Отображаем информацию о токенах с анализом изменений для HuggingFace
                     if (message.promptTokens != null || message.completionTokens != null || message.totalTokens != null) {
-                        Row(
-                            horizontalArrangement = Arrangement.spacedBy(8.dp),
-                            modifier = Modifier.padding(top = 2.dp)
+                        Column(
+                            modifier = Modifier.padding(top = 2.dp),
+                            verticalArrangement = Arrangement.spacedBy(4.dp)
                         ) {
-                            message.promptTokens?.let { tokens ->
-                                Text(
-                                    text = "Prompt: $tokens",
-                                    style = MaterialTheme.typography.bodySmall,
-                                    color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.7f)
-                                )
+                            // Основная информация о токенах
+                            Row(
+                                horizontalArrangement = Arrangement.spacedBy(8.dp)
+                            ) {
+                                message.promptTokens?.let { tokens ->
+                                    Text(
+                                        text = "Prompt: $tokens",
+                                        style = MaterialTheme.typography.bodySmall,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.7f)
+                                    )
+                                }
+                                message.completionTokens?.let { tokens ->
+                                    Text(
+                                        text = "Completion: $tokens",
+                                        style = MaterialTheme.typography.bodySmall,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.7f)
+                                    )
+                                }
+                                message.totalTokens?.let { tokens ->
+                                    Text(
+                                        text = "Total: $tokens",
+                                        style = MaterialTheme.typography.bodySmall,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.7f)
+                                    )
+                                }
                             }
-                            message.completionTokens?.let { tokens ->
-                                Text(
-                                    text = "Completion: $tokens",
-                                    style = MaterialTheme.typography.bodySmall,
-                                    color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.7f)
-                                )
-                            }
-                            message.totalTokens?.let { tokens ->
-                                Text(
-                                    text = "Total: $tokens",
-                                    style = MaterialTheme.typography.bodySmall,
-                                    color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.7f)
-                                )
+                            
+                            // Анализ изменений по сравнению с предыдущим сообщением
+                            previousMessage?.let { prev ->
+                                val changes = buildList {
+                                    message.promptTokens?.let { current ->
+                                        prev.promptTokens?.let { prevValue ->
+                                            val diff = current - prevValue
+                                            if (diff != 0) {
+                                                add("Prompt: ${formatTokenChange(diff)}")
+                                            }
+                                        }
+                                    }
+                                    message.completionTokens?.let { current ->
+                                        prev.completionTokens?.let { prevValue ->
+                                            val diff = current - prevValue
+                                            if (diff != 0) {
+                                                add("Completion: ${formatTokenChange(diff)}")
+                                            }
+                                        }
+                                    }
+                                    message.totalTokens?.let { current ->
+                                        prev.totalTokens?.let { prevValue ->
+                                            val diff = current - prevValue
+                                            if (diff != 0) {
+                                                add("Total: ${formatTokenChange(diff)}")
+                                            }
+                                        }
+                                    }
+                                }
+                                
+                                if (changes.isNotEmpty()) {
+                                    Text(
+                                        text = "Изменение: ${changes.joinToString(", ")}",
+                                        style = MaterialTheme.typography.bodySmall,
+                                        color = MaterialTheme.colorScheme.primary.copy(alpha = 0.8f),
+                                        modifier = Modifier.padding(top = 2.dp)
+                                    )
+                                }
                             }
                         }
                     }
@@ -370,6 +452,81 @@ private fun formatResponseTime(timeMs: Long): String {
         timeMs < 60000 -> String.format("%.1fs", timeMs / 1000.0)
         else -> String.format("%.1fmin", timeMs / 60000.0)
     }
+}
+
+private fun formatTokenChange(diff: Int): String {
+    return when {
+        diff > 0 -> "+$diff"
+        diff < 0 -> "$diff"
+        else -> "0"
+    }
+}
+
+@Composable
+fun MaxTokensDialog(
+    currentMaxTokens: Int?,
+    onDismiss: () -> Unit,
+    onConfirm: (Int?) -> Unit
+) {
+    var maxTokensText by remember(currentMaxTokens) { mutableStateOf(currentMaxTokens?.toString() ?: "") }
+    var errorMessage by remember { mutableStateOf<String?>(null) }
+    
+    LaunchedEffect(currentMaxTokens) {
+        maxTokensText = currentMaxTokens?.toString() ?: ""
+    }
+    
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("Max Tokens") },
+        text = {
+            Column {
+                Text(
+                    "Maximum number of tokens to generate in the response. " +
+                    "Leave empty for unlimited tokens. " +
+                    "Typical values: 100-2000 tokens.",
+                    style = MaterialTheme.typography.bodyMedium
+                )
+                Spacer(modifier = Modifier.height(16.dp))
+                
+                OutlinedTextField(
+                    value = maxTokensText,
+                    onValueChange = { 
+                        maxTokensText = it
+                        errorMessage = null
+                    },
+                    modifier = Modifier.fillMaxWidth(),
+                    placeholder = { Text("Unlimited (leave empty)") },
+                    label = { Text("Max Tokens") },
+                    singleLine = true,
+                    isError = errorMessage != null,
+                    supportingText = errorMessage?.let { { Text(it) } }
+                )
+            }
+        },
+        confirmButton = {
+            TextButton(
+                onClick = {
+                    if (maxTokensText.isBlank()) {
+                        onConfirm(null)
+                    } else {
+                        val value = maxTokensText.toIntOrNull()
+                        if (value != null && value > 0) {
+                            onConfirm(value)
+                        } else {
+                            errorMessage = "Please enter a valid positive number"
+                        }
+                    }
+                }
+            ) {
+                Text("Save")
+            }
+        },
+        dismissButton = {
+            TextButton(onClick = onDismiss) {
+                Text("Cancel")
+            }
+        }
+    )
 }
 
 @Composable

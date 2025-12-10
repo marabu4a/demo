@@ -34,6 +34,9 @@ class ChatViewModel(
     private val _temperature = mutableStateOf(0.0f)
     val temperature: State<Float> = _temperature
     
+    private val _maxTokens = mutableStateOf<Int?>(null)
+    val maxTokens: State<Int?> = _maxTokens
+    
     private val _selectedModel = mutableStateOf(AiModel.GIGACHAT)
     val selectedModel: State<AiModel> = _selectedModel
     
@@ -48,6 +51,11 @@ class ChatViewModel(
     fun setTemperature(value: Float) {
         _temperature.value = value
         AppLogger.d(TAG, "Temperature set to: $value")
+    }
+    
+    fun setMaxTokens(value: Int?) {
+        _maxTokens.value = value
+        AppLogger.d(TAG, "Max tokens set to: $value")
     }
     
     fun setSelectedModel(model: AiModel) {
@@ -226,11 +234,18 @@ class ChatViewModel(
                     }
                 }
                 
-                AppLogger.d(TAG, "Calling AI API (${_selectedModel.value.displayName}) with ${_session.value.messages.size} messages, temperature: ${_temperature.value}")
+                // Определяем maxTokens только для HuggingFace моделей
+                val maxTokens = if (_selectedModel.value.type == AiModelType.HUGGINGFACE) {
+                    _maxTokens.value
+                } else {
+                    null
+                }
+                
+                AppLogger.d(TAG, "Calling AI API (${_selectedModel.value.displayName}) with ${_session.value.messages.size} messages, temperature: ${_temperature.value}, maxTokens: $maxTokens")
                 
                 // Засекаем время начала запроса
                 val startTime = currentTimeMillis()
-                val response = client.sendMessage(_session.value.messages, _temperature.value)
+                val response = client.sendMessage(_session.value.messages, _temperature.value, maxTokens)
                 val endTime = currentTimeMillis()
                 val responseTime = endTime - startTime
                 

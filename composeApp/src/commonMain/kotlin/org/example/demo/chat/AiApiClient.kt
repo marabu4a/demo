@@ -16,7 +16,7 @@ import kotlinx.serialization.json.JsonIgnoreUnknownKeys
 import kotlin.random.Random
 
 interface AiApiClient {
-    suspend fun sendMessage(messages: List<Message>, temperature: Float = 0.0f): String
+    suspend fun sendMessage(messages: List<Message>, temperature: Float = 0.0f, maxTokens: Int? = null): String
     suspend fun getAccessToken(authorizationKey: String): String
     val model: AiModel
 }
@@ -206,13 +206,13 @@ class GigaChatApiClient(
         }
     }
     
-    override suspend fun sendMessage(messages: List<Message>, temperature: Float): String = withContext(Dispatchers.Default) {
+    override suspend fun sendMessage(messages: List<Message>, temperature: Float, maxTokens: Int?): String = withContext(Dispatchers.Default) {
         try {
             // Проверяем и обновляем токен при необходимости
             refreshTokenIfNeeded()
             
             AppLogger.d(TAG, "Sending message to API: $API_URL")
-            AppLogger.d(TAG, "Messages count: ${messages.size}, temperature: $temperature")
+            AppLogger.d(TAG, "Messages count: ${messages.size}, temperature: $temperature, maxTokens: $maxTokens")
             
             val chatMessages = messages.map { message ->
                 ChatMessage(
@@ -265,7 +265,7 @@ class GigaChatApiClient(
                                 refreshTokenIfNeeded()
                                 // Повторяем запрос с новым токеном
                                 AppLogger.d(TAG, "Retrying request with refreshed token")
-                                return@withContext sendMessage(messages, temperature)
+                                return@withContext sendMessage(messages, temperature, maxTokens)
                             } catch (refreshError: Exception) {
                                 AppLogger.e(TAG, "Failed to refresh token", refreshError)
                                 throw Exception("Unauthorized ($statusCode): $errorBody")
@@ -356,7 +356,7 @@ class HuggingFaceApiClient(
         private const val TAG = "HuggingFaceApiClient"
         // Встроенный токен для HuggingFace API
         // Замените на ваш токен или оставьте пустым для ручного ввода
-        private const val HUGGINGFACE_API_TOKEN = "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"
+        private const val HUGGINGFACE_API_TOKEN = "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"
     }
     
     fun setApiToken(token: String) {
@@ -397,7 +397,8 @@ class HuggingFaceApiClient(
     data class HuggingFaceRequest(
         val messages: List<HuggingFaceMessage>,
         val model: String,
-        val stream: Boolean = false
+        val stream: Boolean = false,
+        val max_tokens: Int? = null
         //val parameters: HuggingFaceParameters? = null
     )
     
@@ -440,14 +441,14 @@ class HuggingFaceApiClient(
         val total_tokens: Int? = null,
     )
     
-    override suspend fun sendMessage(messages: List<Message>, temperature: Float): String = withContext(Dispatchers.Default) {
+    override suspend fun sendMessage(messages: List<Message>, temperature: Float, maxTokens: Int?): String = withContext(Dispatchers.Default) {
         try {
             if (apiToken.isBlank()) {
                 throw Exception("HuggingFace API token is required. Please set it in settings.")
             }
             
             AppLogger.d(TAG, "Sending message to HuggingFace API: ${model.apiUrl}")
-            AppLogger.d(TAG, "Messages count: ${messages.size}, temperature: $temperature")
+            AppLogger.d(TAG, "Messages count: ${messages.size}, temperature: $temperature, maxTokens: $maxTokens")
             
             // Преобразуем сообщения в формат HuggingFace
             val hfMessages = messages.map { msg ->
@@ -464,7 +465,8 @@ class HuggingFaceApiClient(
             val request = HuggingFaceRequest(
                 messages = hfMessages,
                 model = model.name,
-                stream = false
+                stream = false,
+                max_tokens = maxTokens
                 //parameters = null
             )
             
