@@ -4,11 +4,17 @@ import androidx.compose.runtime.*
 import kotlinx.coroutines.*
 import kotlin.random.Random
 
+enum class DialogueMode {
+    NORMAL,      // Обычный режим - все сообщения хранятся
+    SUMMARY      // Режим сжатия - каждые N сообщений создается summary
+}
+
 class ChatViewModel(
     private val apiClientManager: AiApiClientManager
 ) {
     companion object {
         private const val TAG = "ChatViewModel"
+        private const val COMPRESSION_THRESHOLD = 10 // Сжимать каждые 10 сообщений (всех типов)
     }
     
     private val viewModelScope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
@@ -42,6 +48,20 @@ class ChatViewModel(
     
     private val _huggingFaceToken = mutableStateOf("")
     val huggingFaceToken: State<String> = _huggingFaceToken
+    
+    private val _dialogueMode = mutableStateOf(DialogueMode.NORMAL)
+    val dialogueMode: State<DialogueMode> = _dialogueMode
+    
+    // Храним сжатое резюме истории отдельно (не показывается в UI, используется в запросах)
+    // Вместе с summary храним количество сжатых сообщений пользователя
+    private data class CompressedSummary(
+        val summary: String,
+        val compressedUserMessagesCount: Int // Количество сообщений пользователя, сжатых в summary
+    )
+    private var _compressedSummary: CompressedSummary? = null
+    
+    // Храним ID всех сообщений (пользователя и AI), которые уже сжаты в summary (чтобы исключить их из запросов)
+    private var _compressedMessageIds: Set<String> = emptySet()
     
     fun toggleSystemRole() {
         _useSystemRole.value = !_useSystemRole.value
@@ -241,11 +261,48 @@ class ChatViewModel(
                     null
                 }
                 
-                AppLogger.d(TAG, "Calling AI API (${_selectedModel.value.displayName}) with ${_session.value.messages.size} messages, temperature: ${_temperature.value}, maxTokens: $maxTokens")
+                // Формируем список сообщений для отправки:
+                // 1. Если есть summary, добавляем его первым
+                // 2. Исключаем сообщения пользователя, которые уже сжаты в summary
+                // 3. Добавляем остальные сообщения (ответы AI и новые сообщения пользователя)
+                val messagesToSend = buildList {
+                    // Если есть сжатое резюме, добавляем его как системное сообщение
+                    _compressedSummary?.let { compressed ->
+                        add(Message(
+                            id = generateId(),
+                            content = compressed.summary,
+                            role = MessageRole.SYSTEM
+                        ))
+                    }
+                    // Добавляем сообщения из сессии, исключая сжатые сообщения (и пользователя, и AI)
+                    _session.value.messages.forEach { message ->
+                        // Включаем только те сообщения, которые не сжаты
+                        if (message.id !in _compressedMessageIds) {
+                            add(message)
+                        }
+                    }
+                }
+                
+                // Подсчитываем общее количество сообщений в запросе
+                val totalMessagesCount = messagesToSend.size
+                
+                // Подсчитываем количество сообщений от пользователя (USER) для логирования:
+                // сжатые сообщения пользователя из summary + текущие сообщения пользователя (не сжатые)
+                val currentUserMessagesCount = _session.value.messages.count { 
+                    it.role == MessageRole.USER && it.id !in _compressedMessageIds 
+                }
+                val userMessagesCount = (_compressedSummary?.compressedUserMessagesCount ?: 0) + currentUserMessagesCount
+                
+                // Подсчитываем общую длину для логирования
+                val totalLength = messagesToSend.sumOf { it.content.length }
+                val summaryLength = _compressedSummary?.summary?.length ?: 0
+                val regularLength = _session.value.messages.sumOf { it.content.length }
+                
+                AppLogger.d(TAG, "Calling AI API (${_selectedModel.value.displayName}) with $totalMessagesCount messages (${_compressedSummary?.let { "1 summary (${summaryLength} chars, ${it.compressedUserMessagesCount} user msgs) + " } ?: ""}${_session.value.messages.size} regular (${regularLength} chars)), total user messages: $userMessagesCount (compressed: ${_compressedSummary?.compressedUserMessagesCount ?: 0}, current: $currentUserMessagesCount), total: ${totalLength} chars, temperature: ${_temperature.value}, maxTokens: $maxTokens")
                 
                 // Засекаем время начала запроса
                 val startTime = currentTimeMillis()
-                val response = client.sendMessage(_session.value.messages, _temperature.value, maxTokens)
+                val response = client.sendMessage(messagesToSend, _temperature.value, maxTokens)
                 val endTime = currentTimeMillis()
                 val responseTime = endTime - startTime
                 
@@ -274,10 +331,14 @@ class ChatViewModel(
                     responseTimeMs = responseTime,
                     promptTokens = promptTokens,
                     completionTokens = completionTokens,
-                    totalTokens = totalTokens
+                    totalTokens = totalTokens,
+                    sentMessagesCount = totalMessagesCount
                 )
                 _session.value.messages.add(assistantMessage)
                 AppLogger.i(TAG, "Message successfully processed and added to session (response time: ${responseTime}ms)")
+                
+                // Проверяем и сжимаем историю, если необходимо
+                checkAndCompressHistory()
             } catch (e: Exception) {
                 val errorMsg = e.message ?: "Failed to get response"
                 val fullError = if (e.cause != null && e.cause?.message != null) {
@@ -297,11 +358,186 @@ class ChatViewModel(
     
     fun clearChat() {
         _session.value = ChatSession()
+        _compressedSummary = null
+        _compressedMessageIds = emptySet()
         _errorMessage.value = null
     }
     
     fun dismissError() {
         _errorMessage.value = null
+    }
+    
+    /**
+     * Переключает режим диалога между NORMAL и SUMMARY.
+     * При переключении очищает историю сообщений.
+     */
+    fun toggleDialogueMode() {
+        val newMode = when (_dialogueMode.value) {
+            DialogueMode.NORMAL -> DialogueMode.SUMMARY
+            DialogueMode.SUMMARY -> DialogueMode.NORMAL
+        }
+        AppLogger.d(TAG, "Switching dialogue mode from ${_dialogueMode.value} to $newMode")
+        _dialogueMode.value = newMode
+        // Очищаем историю и summary при переключении режима
+        _compressedSummary = null
+        _compressedMessageIds = emptySet()
+        clearChat()
+    }
+    
+    /**
+     * Сжимает историю диалога, создавая summary последних N сообщений (всех типов).
+     * Сообщения остаются в UI, но исключаются из запросов, заменяясь на summary.
+     */
+    private suspend fun compressHistory() {
+        val messages = _session.value.messages
+        
+        if (messages.size < COMPRESSION_THRESHOLD) {
+            AppLogger.d(TAG, "Not enough messages to compress: ${messages.size} < $COMPRESSION_THRESHOLD")
+            return
+        }
+        
+        AppLogger.d(TAG, "Starting history compression: ${messages.size} total messages")
+        
+        try {
+            val client = apiClientManager.getClient(_selectedModel.value)
+            
+            // Берем последние COMPRESSION_THRESHOLD сообщений (всех типов)
+            val messagesToCompress = messages.takeLast(COMPRESSION_THRESHOLD)
+            val compressMessageIds = messagesToCompress.map { it.id }.toSet()
+            
+            if (messagesToCompress.isEmpty()) {
+                AppLogger.d(TAG, "No messages to compress")
+                return
+            }
+            
+            // Подсчитываем длину новых сообщений для сжатия
+            val newMessagesLength = messagesToCompress.sumOf { it.content.length }
+            val previousSummaryLength = _compressedSummary?.summary?.length ?: 0
+            
+            // Подсчитываем количество сообщений пользователя в сжатых сообщениях
+            val newUserMessagesCount = messagesToCompress.count { it.role == MessageRole.USER }
+            
+            // Ограничиваем длину summary: максимум 30% от длины новых сообщений, но не менее 100 символов
+            val maxNewSummaryLength = maxOf(100, (newMessagesLength * 0.3).toInt())
+            val maxSummaryTokens = maxOf(50, maxNewSummaryLength / 3)
+            
+            // Формируем текст для summary (включая и сообщения пользователя, и ответы AI)
+            val conversationText = messagesToCompress.joinToString("\n\n") { msg ->
+                val role = when (msg.role) {
+                    MessageRole.USER -> "Пользователь"
+                    MessageRole.ASSISTANT -> "Ассистент"
+                    MessageRole.SYSTEM -> "Система"
+                }
+                "$role: ${msg.content}"
+            }
+            
+            val summaryPrompt = if (_compressedSummary != null) {
+                // Если есть предыдущий summary, создаем новый summary только из новых сообщений,
+                // а затем объединяем его с предыдущим summary
+                """
+                    Создай ОЧЕНЬ краткое резюме следующей части диалога (максимум $maxSummaryTokens токенов).
+                    Резюме должно быть на русском языке и содержать ТОЛЬКО ключевые моменты и важные решения.
+                    
+                    Новая часть диалога:
+                    $conversationText
+                    
+                    Краткое резюме новой части (максимум $maxSummaryTokens токенов):
+                """.trimIndent()
+            } else {
+                """
+                    Создай ОЧЕНЬ краткое резюме следующего диалога, сохраняя ТОЛЬКО ключевые моменты и важные решения.
+                    Резюме должно быть на русском языке и быть максимально сжатым (максимум $maxSummaryTokens токенов).
+                    
+                    Диалог:
+                    $conversationText
+                    
+                    Краткое резюме (максимум $maxSummaryTokens токенов):
+                """.trimIndent()
+            }
+            
+            // Создаем список сообщений для запроса summary
+            val summaryRequestMessages = listOf(
+                Message(
+                    id = generateId(),
+                    content = summaryPrompt,
+                    role = MessageRole.USER
+                )
+            )
+            
+            AppLogger.d(TAG, "Requesting summary for ${messagesToCompress.size} messages (previous summary: ${_compressedSummary != null}, new messages length: $newMessagesLength, new user messages: $newUserMessagesCount, max tokens: $maxSummaryTokens)")
+            val newSummary = client.sendMessage(summaryRequestMessages, temperature = 0.2f, maxTokens = maxSummaryTokens)
+            AppLogger.d(TAG, "New summary received, length: ${newSummary.length} (new messages: $newMessagesLength, compression ratio: ${if (newMessagesLength > 0) (newSummary.length.toDouble() / newMessagesLength * 100).toInt() else 0}%)")
+            
+            // Объединяем новый summary с предыдущим (если есть) в компактном виде
+            val (finalSummary, finalUserMessagesCount) = if (_compressedSummary != null) {
+                // Если есть предыдущий summary, объединяем их компактно
+                val combinedLength = _compressedSummary!!.summary.length + newSummary.length
+                val maxCombinedTokens = maxOf(100, (combinedLength * 0.4).toInt() / 3) // Ограничиваем объединенный summary
+                
+                val combinePrompt = """
+                    Объедини два резюме в одно КРАТКОЕ резюме (максимум $maxCombinedTokens токенов).
+                    Удали избыточную информацию и повторы. Сохрани только ключевые моменты.
+                    
+                    Предыдущее резюме:
+                    ${_compressedSummary!!.summary}
+                    
+                    Новое резюме:
+                    $newSummary
+                    
+                    Объединенное краткое резюме (максимум $maxCombinedTokens токенов):
+                """.trimIndent()
+                
+                val combineMessages = listOf(
+                    Message(
+                        id = generateId(),
+                        content = combinePrompt,
+                        role = MessageRole.USER
+                    )
+                )
+                
+                val combined = client.sendMessage(combineMessages, temperature = 0.2f, maxTokens = maxCombinedTokens)
+                val totalUserMessagesCount = _compressedSummary!!.compressedUserMessagesCount + newUserMessagesCount
+                AppLogger.d(TAG, "Combined summary length: ${combined.length} (previous: ${_compressedSummary!!.summary.length}, new: ${newSummary.length}, total before: $combinedLength), total user messages: $totalUserMessagesCount")
+                Pair(combined, totalUserMessagesCount)
+            } else {
+                Pair(newSummary, newUserMessagesCount)
+            }
+            
+            // Сохраняем итоговый summary отдельно (не добавляем в messages и не удаляем из UI)
+            _compressedSummary = CompressedSummary(
+                summary = finalSummary,
+                compressedUserMessagesCount = finalUserMessagesCount
+            )
+            
+            // Сохраняем ID всех сжатых сообщений (пользователя и AI) для исключения их из запросов
+            // Если есть предыдущие сжатые сообщения, объединяем их с новыми
+            _compressedMessageIds = _compressedMessageIds + compressMessageIds
+            
+            AppLogger.d(TAG, "Compressed ${messagesToCompress.size} messages (${newUserMessagesCount} user + ${messagesToCompress.size - newUserMessagesCount} AI), total compressed IDs: ${_compressedMessageIds.size}")
+            
+            // НЕ удаляем сообщения из UI - они остаются видимыми
+            AppLogger.i(TAG, "History compressed: ${messagesToCompress.size} user messages compressed into summary (${finalUserMessagesCount} total), UI messages unchanged: ${messages.size} messages")
+        } catch (e: Exception) {
+            AppLogger.e(TAG, "Failed to compress history: ${e.message}", e)
+            // В случае ошибки не сжимаем историю, продолжаем работу
+            _errorMessage.value = "Не удалось сжать историю: ${e.message}"
+        }
+    }
+    
+    /**
+     * Проверяет, нужно ли сжимать историю, и выполняет сжатие если необходимо.
+     * Сжатие происходит когда накопилось COMPRESSION_THRESHOLD сообщений (всех типов).
+     */
+    private suspend fun checkAndCompressHistory() {
+        if (_dialogueMode.value == DialogueMode.SUMMARY) {
+            // Считаем все сообщения (пользователя и AI)
+            val totalMessagesCount = _session.value.messages.size
+            
+            // Сжимаем, если количество сообщений кратно порогу
+            if (totalMessagesCount > 0 && totalMessagesCount % COMPRESSION_THRESHOLD == 0) {
+                compressHistory()
+            }
+        }
     }
     
     private fun generateId(): String {

@@ -11,7 +11,8 @@ data class Message(
     val responseTimeMs: Long? = null,
     val promptTokens: Int? = null,
     val completionTokens: Int? = null,
-    val totalTokens: Int? = null
+    val totalTokens: Int? = null,
+    val sentMessagesCount: Int? = null // Количество сообщений, отправленных в запросе (для режима SUMMARY)
 )
 
 enum class MessageRole {

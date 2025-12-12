@@ -1,6 +1,7 @@
 package org.example.demo.chat
 
 import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
@@ -15,6 +16,8 @@ import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.platform.LocalClipboardManager
+import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -33,6 +36,7 @@ fun ChatScreen(viewModel: ChatViewModel) {
     val maxTokens by viewModel.maxTokens
     val selectedModel by viewModel.selectedModel
     val huggingFaceToken by viewModel.huggingFaceToken
+    val dialogueMode by viewModel.dialogueMode
     
     var messageText by remember { mutableStateOf("") }
     var showAccessTokenDialog by remember { mutableStateOf(false) }
@@ -114,6 +118,19 @@ fun ChatScreen(viewModel: ChatViewModel) {
                         text = if (useSystemRole) "System" else "User",
                         fontSize = 12.sp,
                         color = if (useSystemRole) 
+                            MaterialTheme.colorScheme.primary 
+                        else 
+                            MaterialTheme.colorScheme.onSurface
+                    )
+                }
+                IconButton(
+                    onClick = { viewModel.toggleDialogueMode() },
+                    modifier = Modifier.padding(horizontal = 4.dp)
+                ) {
+                    Text(
+                        text = if (dialogueMode == DialogueMode.SUMMARY) "Summary" else "Normal",
+                        fontSize = 12.sp,
+                        color = if (dialogueMode == DialogueMode.SUMMARY) 
                             MaterialTheme.colorScheme.primary 
                         else 
                             MaterialTheme.colorScheme.onSurface
@@ -311,6 +328,23 @@ fun ChatScreen(viewModel: ChatViewModel) {
 @Composable
 fun MessageBubble(message: Message, isLoading: Boolean = false, previousMessage: Message? = null) {
     val isUser = message.role == MessageRole.USER
+    val isSummary = message.role == MessageRole.SYSTEM && message.content.startsWith("[Summary]")
+    val summaryContent = if (isSummary) {
+        message.content.removePrefix("[Summary]").trim()
+    } else {
+        message.content
+    }
+    
+    val clipboardManager = LocalClipboardManager.current
+    var showCopyConfirmation by remember { mutableStateOf(false) }
+    
+    // Показываем подтверждение копирования на 2 секунды
+    LaunchedEffect(showCopyConfirmation) {
+        if (showCopyConfirmation) {
+            kotlinx.coroutines.delay(2000)
+            showCopyConfirmation = false
+        }
+    }
     
     Row(
         modifier = Modifier.fillMaxWidth(),
@@ -321,6 +355,16 @@ fun MessageBubble(message: Message, isLoading: Boolean = false, previousMessage:
                 .fillMaxWidth(fraction = 0.75f)
                 .widthIn(min = 200.dp, max = 800.dp)
         ) {
+            // Показываем метку для summary-сообщений
+            if (isSummary) {
+                Text(
+                    text = "📋 Summary",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.primary,
+                    modifier = Modifier.padding(bottom = 4.dp, start = 4.dp)
+                )
+            }
+            
             Box(
                 modifier = Modifier
                     .clip(
@@ -332,25 +376,57 @@ fun MessageBubble(message: Message, isLoading: Boolean = false, previousMessage:
                         )
                     )
                     .background(
-                        if (isUser) MaterialTheme.colorScheme.primary
-                        else MaterialTheme.colorScheme.surfaceVariant
+                        when {
+                            isUser -> MaterialTheme.colorScheme.primary
+                            isSummary -> MaterialTheme.colorScheme.secondaryContainer
+                            else -> MaterialTheme.colorScheme.surfaceVariant
+                        }
                     )
-                    .padding(12.dp)
             ) {
-                if (isLoading) {
-                    CircularProgressIndicator(
-                        modifier = Modifier.size(20.dp),
-                        strokeWidth = 2.dp
-                    )
-                } else {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
                     Text(
-                        text = message.content,
+                        text = summaryContent,
                         style = MaterialTheme.typography.bodyMedium,
-                        color = if (isUser) 
-                            MaterialTheme.colorScheme.onPrimary 
-                        else 
-                            MaterialTheme.colorScheme.onSurfaceVariant
+                        color = when {
+                            isUser -> MaterialTheme.colorScheme.onPrimary
+                            isSummary -> MaterialTheme.colorScheme.onSecondaryContainer
+                            else -> MaterialTheme.colorScheme.onSurfaceVariant
+                        },
+                        modifier = Modifier
+                            .weight(1f)
+                            .padding(12.dp)
                     )
+                    
+                    if (!isLoading) {
+                        Text(
+                            text = if (showCopyConfirmation) "✓" else "📋",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = when {
+                                isUser -> MaterialTheme.colorScheme.onPrimary.copy(alpha = 0.7f)
+                                isSummary -> MaterialTheme.colorScheme.onSecondaryContainer.copy(alpha = 0.7f)
+                                else -> MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.7f)
+                            },
+                            modifier = Modifier
+                                .padding(end = 8.dp)
+                                .clickable(
+                                    onClick = {
+                                        clipboardManager.setText(AnnotatedString(summaryContent))
+                                        showCopyConfirmation = true
+                                    }
+                                )
+                        )
+                    } else {
+                        CircularProgressIndicator(
+                            modifier = Modifier
+                                .size(20.dp)
+                                .padding(12.dp),
+                            strokeWidth = 2.dp
+                        )
+                    }
                 }
             }
             
@@ -364,6 +440,16 @@ fun MessageBubble(message: Message, isLoading: Boolean = false, previousMessage:
                             text = formatResponseTime(message.responseTimeMs),
                             style = MaterialTheme.typography.bodySmall,
                             color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
+                    
+                    // Отображаем общее количество отправленных сообщений
+                    message.sentMessagesCount?.let { count ->
+                        Text(
+                            text = "Сообщений в запросе: $count",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.primary.copy(alpha = 0.8f),
+                            modifier = Modifier.padding(top = 2.dp)
                         )
                     }
                     
