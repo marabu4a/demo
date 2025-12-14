@@ -356,7 +356,7 @@ class HuggingFaceApiClient(
         private const val TAG = "HuggingFaceApiClient"
         // Встроенный токен для HuggingFace API
         // Замените на ваш токен или оставьте пустым для ручного ввода
-        private const val HUGGINGFACE_API_TOKEN = "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"
+        private const val HUGGINGFACE_API_TOKEN = "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"
     }
     
     fun setApiToken(token: String) {

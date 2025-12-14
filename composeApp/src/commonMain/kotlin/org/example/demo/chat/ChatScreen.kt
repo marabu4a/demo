@@ -37,6 +37,7 @@ fun ChatScreen(viewModel: ChatViewModel) {
     val selectedModel by viewModel.selectedModel
     val huggingFaceToken by viewModel.huggingFaceToken
     val dialogueMode by viewModel.dialogueMode
+    val showLoadHistoryDialog by viewModel.showLoadHistoryDialog
     
     var messageText by remember { mutableStateOf("") }
     var showAccessTokenDialog by remember { mutableStateOf(false) }
@@ -296,6 +297,15 @@ fun ChatScreen(viewModel: ChatViewModel) {
         )
     }
     
+    // Диалог загрузки истории
+    if (showLoadHistoryDialog) {
+        LoadHistoryDialog(
+            modelName = selectedModel.displayName,
+            onDismiss = { viewModel.dismissLoadHistory() },
+            onLoad = { viewModel.loadHistory() }
+        )
+    }
+    
     // Показ ошибок
     errorMessage?.let { error ->
         AlertDialog(
@@ -323,6 +333,41 @@ fun ChatScreen(viewModel: ChatViewModel) {
             }
         )
     }
+}
+
+@Composable
+fun LoadHistoryDialog(
+    modelName: String,
+    onDismiss: () -> Unit,
+    onLoad: () -> Unit
+) {
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("Загрузить историю?") },
+        text = {
+            Column {
+                Text(
+                    text = "Найдена сохраненная история диалога для модели \"$modelName\".",
+                    style = MaterialTheme.typography.bodyMedium
+                )
+                Spacer(modifier = Modifier.height(8.dp))
+                Text(
+                    text = "Хотите загрузить её и продолжить диалог?",
+                    style = MaterialTheme.typography.bodyMedium
+                )
+            }
+        },
+        confirmButton = {
+            TextButton(onClick = onLoad) {
+                Text("Загрузить")
+            }
+        },
+        dismissButton = {
+            TextButton(onClick = onDismiss) {
+                Text("Отмена")
+            }
+        }
+    )
 }
 
 @Composable

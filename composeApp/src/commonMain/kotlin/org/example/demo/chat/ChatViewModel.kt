@@ -18,6 +18,15 @@ class ChatViewModel(
     }
     
     private val viewModelScope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
+
+    init {
+        // Проверяем наличие сохраненной истории при инициализации
+        viewModelScope.launch {
+            if (_session.value.messages.isEmpty()) {
+                checkForSavedHistory()
+            }
+        }
+    }
     
     private val _session = mutableStateOf(ChatSession())
     val session: State<ChatSession> = _session
@@ -52,6 +61,12 @@ class ChatViewModel(
     private val _dialogueMode = mutableStateOf(DialogueMode.NORMAL)
     val dialogueMode: State<DialogueMode> = _dialogueMode
     
+    // Состояние для диалога загрузки истории
+    private val _showLoadHistoryDialog = mutableStateOf(false)
+    val showLoadHistoryDialog: State<Boolean> = _showLoadHistoryDialog
+    
+    private var _pendingHistoryModel: String? = null
+    
     // Храним сжатое резюме истории отдельно (не показывается в UI, используется в запросах)
     // Вместе с summary храним количество сжатых сообщений пользователя
     private data class CompressedSummary(
@@ -62,6 +77,10 @@ class ChatViewModel(
     
     // Храним ID всех сообщений (пользователя и AI), которые уже сжаты в summary (чтобы исключить их из запросов)
     private var _compressedMessageIds: Set<String> = emptySet()
+    
+    // Храним загруженную историю (не показывается в UI, используется только в запросах)
+    private var _loadedHistory: List<Message>? = null
+    private var _loadedHistoryUserMessagesCount: Int = 0 // Количество сообщений пользователя в загруженной истории
     
     fun toggleSystemRole() {
         _useSystemRole.value = !_useSystemRole.value
@@ -79,6 +98,11 @@ class ChatViewModel(
     }
     
     fun setSelectedModel(model: AiModel) {
+        // Сохраняем историю для предыдущей модели перед переключением
+        if (_session.value.messages.isNotEmpty()) {
+            saveHistory()
+        }
+        
         _selectedModel.value = model
         AppLogger.d(TAG, "Model changed to: ${model.displayName}")
         
@@ -117,6 +141,11 @@ class ChatViewModel(
                     }
                 }
             }
+        }
+        
+        // Проверяем наличие сохраненной истории для новой модели
+        if (_session.value.messages.isEmpty()) {
+            checkForSavedHistory()
         }
     }
     
@@ -198,6 +227,9 @@ class ChatViewModel(
         )
         
         _session.value.messages.add(userMessage)
+        // Сохраняем историю после добавления сообщения пользователя
+        saveHistory()
+        
         _isLoading.value = true
         _errorMessage.value = null
         
@@ -262,10 +294,16 @@ class ChatViewModel(
                 }
                 
                 // Формируем список сообщений для отправки:
-                // 1. Если есть summary, добавляем его первым
-                // 2. Исключаем сообщения пользователя, которые уже сжаты в summary
-                // 3. Добавляем остальные сообщения (ответы AI и новые сообщения пользователя)
+                // 1. Загруженная история (если есть) - не показывается в UI
+                // 2. Если есть summary, добавляем его как системное сообщение
+                // 3. Исключаем сообщения пользователя, которые уже сжаты в summary
+                // 4. Добавляем остальные сообщения (ответы AI и новые сообщения пользователя)
                 val messagesToSend = buildList {
+                    // Добавляем загруженную историю в начало (если есть)
+                    _loadedHistory?.let { loaded ->
+                        addAll(loaded)
+                    }
+                    
                     // Если есть сжатое резюме, добавляем его как системное сообщение
                     _compressedSummary?.let { compressed ->
                         add(Message(
@@ -283,15 +321,24 @@ class ChatViewModel(
                     }
                 }
                 
+                // После первого использования загруженной истории удаляем её
+                if (_loadedHistory != null) {
+                    _loadedHistory = null
+                    _loadedHistoryUserMessagesCount = 0
+                    AppLogger.d(TAG, "Loaded history used and cleared")
+                }
+                
                 // Подсчитываем общее количество сообщений в запросе
                 val totalMessagesCount = messagesToSend.size
                 
                 // Подсчитываем количество сообщений от пользователя (USER) для логирования:
-                // сжатые сообщения пользователя из summary + текущие сообщения пользователя (не сжатые)
+                // загруженная история + сжатые сообщения пользователя из summary + текущие сообщения пользователя (не сжатые)
                 val currentUserMessagesCount = _session.value.messages.count { 
                     it.role == MessageRole.USER && it.id !in _compressedMessageIds 
                 }
-                val userMessagesCount = (_compressedSummary?.compressedUserMessagesCount ?: 0) + currentUserMessagesCount
+                val userMessagesCount = _loadedHistoryUserMessagesCount + 
+                    (_compressedSummary?.compressedUserMessagesCount ?: 0) + 
+                    currentUserMessagesCount
                 
                 // Подсчитываем общую длину для логирования
                 val totalLength = messagesToSend.sumOf { it.content.length }
@@ -337,6 +384,9 @@ class ChatViewModel(
                 _session.value.messages.add(assistantMessage)
                 AppLogger.i(TAG, "Message successfully processed and added to session (response time: ${responseTime}ms)")
                 
+                // Сохраняем историю после добавления сообщения
+                saveHistory()
+                
                 // Проверяем и сжимаем историю, если необходимо
                 checkAndCompressHistory()
             } catch (e: Exception) {
@@ -357,10 +407,138 @@ class ChatViewModel(
     }
     
     fun clearChat() {
+        // Сохраняем текущую историю перед очисткой
+        saveHistory()
+        
         _session.value = ChatSession()
         _compressedSummary = null
         _compressedMessageIds = emptySet()
+        _loadedHistory = null // Очищаем загруженную историю
+        _loadedHistoryUserMessagesCount = 0
         _errorMessage.value = null
+        
+        // Проверяем, есть ли сохраненная история для текущей модели
+        checkForSavedHistory()
+    }
+    
+    /**
+     * Проверяет наличие сохраненной истории для текущей модели и предлагает загрузить её
+     */
+    private fun checkForSavedHistory() {
+        viewModelScope.launch {
+            val modelName = _selectedModel.value.name
+            val hasHistory = hasChatHistory(modelName)
+            if (hasHistory && _session.value.messages.isEmpty()) {
+                _pendingHistoryModel = modelName
+                _showLoadHistoryDialog.value = true
+            }
+        }
+    }
+    
+    /**
+     * Загружает сохраненную историю для текущей модели (не показывается в UI, используется только в запросах)
+     * История загружается как summary и используется как системное сообщение
+     */
+    fun loadHistory() {
+        viewModelScope.launch {
+            val modelName = _pendingHistoryModel ?: _selectedModel.value.name
+            try {
+                val savedHistory = loadChatHistory(modelName)
+                if (savedHistory != null && savedHistory.summary.isNotBlank()) {
+                    // Создаем системное сообщение из summary для использования в запросах
+                    val summaryMessage = Message(
+                        id = generateId(),
+                        content = savedHistory.summary,
+                        role = MessageRole.SYSTEM
+                    )
+                    // Сохраняем как загруженную историю (не показывается в UI)
+                    _loadedHistory = listOf(summaryMessage)
+                    _loadedHistoryUserMessagesCount = savedHistory.userMessagesCount
+                    AppLogger.i(TAG, "Loaded history summary for model: $modelName, user messages: ${savedHistory.userMessagesCount} (not shown in UI)")
+                    
+                    // Удаляем сохраненную историю после загрузки
+                    deleteChatHistory(modelName)
+                }
+            } catch (e: Exception) {
+                AppLogger.e(TAG, "Failed to load history: ${e.message}", e)
+                _errorMessage.value = "Не удалось загрузить историю: ${e.message}"
+            } finally {
+                _showLoadHistoryDialog.value = false
+                _pendingHistoryModel = null
+            }
+        }
+    }
+    
+    /**
+     * Отказывается от загрузки истории и удаляет сохраненную историю
+     */
+    fun dismissLoadHistory() {
+        viewModelScope.launch {
+            val modelName = _pendingHistoryModel ?: _selectedModel.value.name
+            deleteChatHistory(modelName)
+            AppLogger.d(TAG, "User dismissed history load for model: $modelName")
+            _showLoadHistoryDialog.value = false
+            _pendingHistoryModel = null
+        }
+    }
+    
+    /**
+     * Сохраняет текущую историю для текущей модели в виде summary
+     */
+    private fun saveHistory() {
+        viewModelScope.launch {
+            if (_session.value.messages.isNotEmpty()) {
+                try {
+                    val modelName = _selectedModel.value.name
+                    val client = apiClientManager.getClient(_selectedModel.value)
+                    
+                    // Формируем текст всех сообщений для создания summary
+                    val conversationText = _session.value.messages.joinToString("\n\n") { msg ->
+                        val role = when (msg.role) {
+                            MessageRole.USER -> "Пользователь"
+                            MessageRole.ASSISTANT -> "Ассистент"
+                            MessageRole.SYSTEM -> "Система"
+                        }
+                        "$role: ${msg.content}"
+                    }
+                    
+                    val totalLength = _session.value.messages.sumOf { it.content.length }
+                    val userMessagesCount = _session.value.messages.count { it.role == MessageRole.USER }
+                    val maxSummaryTokens = maxOf(100, (totalLength * 0.3).toInt() / 3)
+                    
+                    val summaryPrompt = """
+                        Создай ОЧЕНЬ краткое резюме следующего диалога, сохраняя ТОЛЬКО ключевые моменты и важные решения.
+                        Резюме должно быть на русском языке и быть максимально сжатым (максимум $maxSummaryTokens токенов).
+                        
+                        Диалог:
+                        $conversationText
+                        
+                        Краткое резюме (максимум $maxSummaryTokens токенов):
+                    """.trimIndent()
+                    
+                    val summaryRequestMessages = listOf(
+                        Message(
+                            id = generateId(),
+                            content = summaryPrompt,
+                            role = MessageRole.USER
+                        )
+                    )
+                    
+                    AppLogger.d(TAG, "Creating summary for history save: ${_session.value.messages.size} messages, user messages: $userMessagesCount")
+                    val summary = client.sendMessage(summaryRequestMessages, temperature = 0.2f, maxTokens = maxSummaryTokens)
+                    AppLogger.d(TAG, "Summary created for history save, length: ${summary.length}")
+                    
+                    // Сохраняем summary вместо полного списка сообщений
+                    val success = saveChatHistory(modelName, summary, userMessagesCount)
+                    if (success) {
+                        AppLogger.d(TAG, "History saved as summary for model: $modelName, original messages: ${_session.value.messages.size}, user messages: $userMessagesCount")
+                    }
+                } catch (e: Exception) {
+                    AppLogger.e(TAG, "Failed to create and save history summary: ${e.message}", e)
+                    // В случае ошибки не прерываем работу
+                }
+            }
+        }
     }
     
     fun dismissError() {
@@ -381,6 +559,8 @@ class ChatViewModel(
         // Очищаем историю и summary при переключении режима
         _compressedSummary = null
         _compressedMessageIds = emptySet()
+        _loadedHistory = null // Очищаем загруженную историю
+        _loadedHistoryUserMessagesCount = 0
         clearChat()
     }
     
