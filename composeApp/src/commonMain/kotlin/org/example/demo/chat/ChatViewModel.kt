@@ -10,7 +10,8 @@ enum class DialogueMode {
 }
 
 class ChatViewModel(
-    private val apiClientManager: AiApiClientManager
+    private val apiClientManager: AiApiClientManager,
+    private val mcpClientManager: McpClientManager? = null
 ) {
     companion object {
         private const val TAG = "ChatViewModel"
@@ -66,6 +67,19 @@ class ChatViewModel(
     val showLoadHistoryDialog: State<Boolean> = _showLoadHistoryDialog
     
     private var _pendingHistoryModel: String? = null
+    
+    // Состояние для MCP серверов
+    data class McpServerConfig(
+        val name: String,
+        val url: String,
+        val connected: Boolean = false
+    )
+    
+    private val _mcpServers = mutableStateOf<List<McpServerConfig>>(emptyList())
+    val mcpServers: State<List<McpServerConfig>> = _mcpServers
+    
+    private val _showMcpServerDialog = mutableStateOf(false)
+    val showMcpServerDialog: State<Boolean> = _showMcpServerDialog
     
     // Храним сжатое резюме истории отдельно (не показывается в UI, используется в запросах)
     // Вместе с summary храним количество сжатых сообщений пользователя
@@ -321,15 +335,22 @@ class ChatViewModel(
                     }
                 }
                 
-                // После первого использования загруженной истории удаляем её
-                if (_loadedHistory != null) {
-                    _loadedHistory = null
-                    _loadedHistoryUserMessagesCount = 0
-                    AppLogger.d(TAG, "Loaded history used and cleared")
-                }
-                
                 // Подсчитываем общее количество сообщений в запросе
                 val totalMessagesCount = messagesToSend.size
+                
+                // Логируем состав запроса для отладки
+                val loadedHistoryCount = _loadedHistory?.size ?: 0
+                val summaryCount = if (_compressedSummary != null) 1 else 0
+                val sessionMessagesCount = _session.value.messages.count { it.id !in _compressedMessageIds }
+                AppLogger.d(TAG, "MessagesToSend composition for ${_selectedModel.value.displayName}: loaded history=$loadedHistoryCount (user msgs: $_loadedHistoryUserMessagesCount), summary=$summaryCount, session=$sessionMessagesCount, total=$totalMessagesCount")
+                
+                // Детальное логирование для отладки
+                if (_loadedHistory != null) {
+                    AppLogger.d(TAG, "Loaded history content: ${_loadedHistory!!.map { "${it.role}: ${it.content.take(50)}..." }.joinToString(", ")}")
+                }
+                if (_compressedSummary != null) {
+                    AppLogger.d(TAG, "Compressed summary: ${_compressedSummary!!.summary.take(100)}...")
+                }
                 
                 // Подсчитываем количество сообщений от пользователя (USER) для логирования:
                 // загруженная история + сжатые сообщения пользователя из summary + текущие сообщения пользователя (не сжатые)
@@ -352,6 +373,13 @@ class ChatViewModel(
                 val response = client.sendMessage(messagesToSend, _temperature.value, maxTokens)
                 val endTime = currentTimeMillis()
                 val responseTime = endTime - startTime
+                
+                // После успешной отправки удаляем загруженную историю (она уже использована)
+                if (_loadedHistory != null) {
+                    _loadedHistory = null
+                    _loadedHistoryUserMessagesCount = 0
+                    AppLogger.d(TAG, "Loaded history used and cleared after successful request")
+                }
                 
                 AppLogger.d(TAG, "Received response from AI, length: ${response.length}, response time: ${responseTime}ms")
                 AppLogger.i(TAG, "AI Response: $response")
@@ -454,7 +482,8 @@ class ChatViewModel(
                     // Сохраняем как загруженную историю (не показывается в UI)
                     _loadedHistory = listOf(summaryMessage)
                     _loadedHistoryUserMessagesCount = savedHistory.userMessagesCount
-                    AppLogger.i(TAG, "Loaded history summary for model: $modelName, user messages: ${savedHistory.userMessagesCount} (not shown in UI)")
+                    AppLogger.i(TAG, "Loaded history summary for model: $modelName, user messages: ${savedHistory.userMessagesCount}, summary length: ${savedHistory.summary.length} (not shown in UI)")
+                    AppLogger.d(TAG, "Loaded history will be added to next request. Summary preview: ${savedHistory.summary.take(100)}...")
                     
                     // Удаляем сохраненную историю после загрузки
                     deleteChatHistory(modelName)
@@ -717,6 +746,185 @@ class ChatViewModel(
             if (totalMessagesCount > 0 && totalMessagesCount % COMPRESSION_THRESHOLD == 0) {
                 compressHistory()
             }
+        }
+    }
+    
+    /**
+     * Подключает MCP сервер по URL
+     */
+    fun connectMcpServer(name: String, url: String) {
+        mcpClientManager?.let { manager ->
+            viewModelScope.launch {
+                try {
+                    val connected = manager.connectServer(name, url)
+                    if (connected) {
+                        val updatedServers = _mcpServers.value.toMutableList()
+                        val existingIndex = updatedServers.indexOfFirst { it.name == name }
+                        if (existingIndex >= 0) {
+                            updatedServers[existingIndex] = McpServerConfig(name, url, true)
+                        } else {
+                            updatedServers.add(McpServerConfig(name, url, true))
+                        }
+                        _mcpServers.value = updatedServers
+                        AppLogger.i(TAG, "MCP server connected: $name")
+                    } else {
+                        _errorMessage.value = "Не удалось подключиться к MCP серверу: $name"
+                    }
+                } catch (e: Exception) {
+                    AppLogger.e(TAG, "Failed to connect MCP server: ${e.message}", e)
+                    _errorMessage.value = "Ошибка подключения к MCP серверу: ${e.message}"
+                }
+            }
+        }
+    }
+    
+    /**
+     * Отключает MCP сервер
+     */
+    fun disconnectMcpServer(name: String) {
+        mcpClientManager?.disconnectServer(name)
+        val updatedServers = _mcpServers.value.map { 
+            if (it.name == name) it.copy(connected = false) else it
+        }
+        _mcpServers.value = updatedServers
+        AppLogger.d(TAG, "MCP server disconnected: $name")
+    }
+    
+    /**
+     * Добавляет MCP сервер в список (без подключения)
+     */
+    fun addMcpServer(name: String, url: String) {
+        val updatedServers = _mcpServers.value.toMutableList()
+        if (updatedServers.any { it.name == name }) {
+            _errorMessage.value = "Сервер с именем '$name' уже существует"
+            return
+        }
+        updatedServers.add(McpServerConfig(name, url, false))
+        _mcpServers.value = updatedServers
+        AppLogger.d(TAG, "MCP server added: $name")
+    }
+    
+    /**
+     * Удаляет MCP сервер из списка
+     */
+    fun removeMcpServer(name: String) {
+        disconnectMcpServer(name)
+        val updatedServers = _mcpServers.value.filter { it.name != name }
+        _mcpServers.value = updatedServers
+        AppLogger.d(TAG, "MCP server removed: $name")
+    }
+    
+    /**
+     * Подключает все MCP серверы из списка
+     */
+    fun connectAllMcpServers() {
+        _mcpServers.value.forEach { server ->
+            if (!server.connected) {
+                connectMcpServer(server.name, server.url)
+            }
+        }
+    }
+    
+    /**
+     * Подключает несколько MCP серверов из списка URL
+     * Формат списка: ["name1:url1", "name2:url2"] или ["url1", "url2"] (имена будут сгенерированы)
+     */
+    fun connectMcpServersFromList(urlList: List<String>) {
+        viewModelScope.launch {
+            mcpClientManager?.let { manager ->
+                try {
+                    val results = manager.connectServersFromList(urlList)
+                    
+                    // Обновляем состояние серверов
+                    val updatedServers = _mcpServers.value.toMutableList()
+                    results.forEach { (name, connected) ->
+                        val existingIndex = updatedServers.indexOfFirst { it.name == name }
+                        val url = manager.getClient(name)?.serverUrl ?: urlList.find { 
+                            it.contains(name) || it.endsWith(name) 
+                        } ?: ""
+                        
+                        if (existingIndex >= 0) {
+                            updatedServers[existingIndex] = McpServerConfig(name, url, connected)
+                        } else if (url.isNotBlank()) {
+                            updatedServers.add(McpServerConfig(name, url, connected))
+                        }
+                    }
+                    _mcpServers.value = updatedServers
+                    
+                    val successCount = results.values.count { it }
+                    AppLogger.i(TAG, "Connected $successCount/${results.size} MCP servers from list")
+                    
+                    if (successCount < results.size) {
+                        val failed = results.filter { !it.value }.keys.joinToString(", ")
+                        _errorMessage.value = "Не удалось подключить некоторые серверы: $failed"
+                    }
+                } catch (e: Exception) {
+                    AppLogger.e(TAG, "Failed to connect MCP servers from list: ${e.message}", e)
+                    _errorMessage.value = "Ошибка подключения серверов: ${e.message}"
+                }
+            }
+        }
+    }
+    
+    fun showMcpServerDialog() {
+        _showMcpServerDialog.value = true
+    }
+    
+    fun hideMcpServerDialog() {
+        _showMcpServerDialog.value = false
+    }
+    
+    /**
+     * Импортирует популярные MCP серверы с mcpservers.org
+     * Список можно найти на: https://mcpservers.org/remote-mcp-servers
+     * 
+     * Примечание: URL серверов должны указывать на MCP endpoint.
+     * Обычно это базовый домен (например, https://notion.mcpservers.org),
+     * клиент автоматически добавит /mcp или /sse если нужно.
+     */
+    fun importPopularMcpServers() {
+        // Популярные remote MCP серверы с mcpservers.org
+        // Формат: "Имя:URL" где URL - базовый адрес сервера
+        // Клиент автоматически определит правильный endpoint (/mcp или /sse)
+        val popularServers = listOf(
+            "Notion:https://notion.mcpservers.org",
+            "Sentry:https://sentry.mcpservers.org",
+            "Linear:https://linear.mcpservers.org",
+            "Figma:https://figma.mcpservers.org",
+            "DeepWiki:https://deepwiki.mcpservers.org",
+            "Intercom:https://intercom.mcpservers.org",
+            "Neon:https://neon.mcpservers.org",
+            "Supabase:https://supabase.mcpservers.org",
+            "PayPal:https://paypal.mcpservers.org",
+            "Square:https://square.mcpservers.org",
+            "CoinGecko:https://coingecko.mcpservers.org",
+            "Ahrefs:https://ahrefs.mcpservers.org",
+            "Asana:https://asana.mcpservers.org",
+            "Atlassian:https://atlassian.mcpservers.org",
+            "Wix:https://wix.mcpservers.org",
+            "Webflow:https://webflow.mcpservers.org",
+            "Globalping:https://globalping.mcpservers.org",
+            "Semgrep:https://semgrep.mcpservers.org",
+            "Fetch:https://fetch.mcpservers.org",
+            "Sequential Thinking:https://sequential-thinking.mcpservers.org",
+            "EdgeOne Pages:https://edgeone-pages.mcpservers.org"
+        )
+        
+        AppLogger.i(TAG, "Importing ${popularServers.size} popular MCP servers from mcpservers.org")
+        connectMcpServersFromList(popularServers)
+    }
+    
+    /**
+     * Импортирует серверы из текстового списка
+     * Формат: каждая строка может быть "имя:URL" или просто "URL"
+     */
+    fun importMcpServersFromText(text: String) {
+        val servers = text.lines()
+            .map { it.trim() }
+            .filter { it.isNotBlank() && !it.startsWith("#") } // Игнорируем пустые строки и комментарии
+        
+        if (servers.isNotEmpty()) {
+            connectMcpServersFromList(servers)
         }
     }
     

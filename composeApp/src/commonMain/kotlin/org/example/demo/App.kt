@@ -11,7 +11,8 @@ fun App() {
     MaterialTheme {
         val httpClient = remember { createHttpClient() }
         val apiClientManager = remember { AiApiClientManager(httpClient) }
-        val viewModel = remember { ChatViewModel(apiClientManager) }
+        val mcpClientManager = remember { McpClientManager(httpClient) }
+        val viewModel = remember { ChatViewModel(apiClientManager, mcpClientManager) }
         
         ChatScreen(viewModel = viewModel)
     }

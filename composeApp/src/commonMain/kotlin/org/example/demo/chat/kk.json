@@ -1,0 +1,49 @@
+{
+  "id": "f526956a4571e73ca02460aa4223527a",
+  "object": "chat.completion",
+  "created": 1765306154,
+  "model": "deepseek/deepseek-v3.2",
+  "choices": [
+    {
+      "index": 0,
+      "message": {
+        "role": "assistant",
+        "content": "Привет! 😊 Рад снова тебя видеть! Чем сегодня займёмся? Может, есть вопросы или что-то интересное рассказать?"
+      },
+      "finish_reason": "stop"
+    }
+  ],
+  "usage": {
+    "prompt_tokens": 25,
+    "completion_tokens": 38,
+    "total_tokens": 63,
+    "prompt_tokens_details": null,
+    "completion_tokens_details": null
+  },
+  "system_fingerprint": ""
+}
+
+{
+  "id": "ce0f177bed52fc72469da63b28981cb1",
+  "object": "chat.completion",
+  "created": 1765305925,
+  "model": "deepseek/deepseek-v3.2",
+  "choices": [
+    {
+      "index": 0,
+      "message": {
+        "role": "assistant",
+        "content": "Hello! How can I assist you today? 😊"
+      },
+      "finish_reason": "stop"
+    }
+  ],
+  "usage": {
+    "prompt_tokens": 11,
+    "completion_tokens": 12,
+    "total_tokens": 23,
+    "prompt_tokens_details": null,
+    "completion_tokens_details": null
+  },
+  "system_fingerprint": ""
+}

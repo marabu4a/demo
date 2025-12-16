@@ -38,6 +38,8 @@ fun ChatScreen(viewModel: ChatViewModel) {
     val huggingFaceToken by viewModel.huggingFaceToken
     val dialogueMode by viewModel.dialogueMode
     val showLoadHistoryDialog by viewModel.showLoadHistoryDialog
+    val mcpServers by viewModel.mcpServers
+    val showMcpServerDialog by viewModel.showMcpServerDialog
     
     var messageText by remember { mutableStateOf("") }
     var showAccessTokenDialog by remember { mutableStateOf(false) }
@@ -132,6 +134,19 @@ fun ChatScreen(viewModel: ChatViewModel) {
                         text = if (dialogueMode == DialogueMode.SUMMARY) "Summary" else "Normal",
                         fontSize = 12.sp,
                         color = if (dialogueMode == DialogueMode.SUMMARY) 
+                            MaterialTheme.colorScheme.primary 
+                        else 
+                            MaterialTheme.colorScheme.onSurface
+                    )
+                }
+                IconButton(
+                    onClick = { viewModel.showMcpServerDialog() },
+                    modifier = Modifier.padding(horizontal = 4.dp)
+                ) {
+                    Text(
+                        text = "MCP: ${mcpServers.count { it.connected }}",
+                        fontSize = 12.sp,
+                        color = if (mcpServers.any { it.connected }) 
                             MaterialTheme.colorScheme.primary 
                         else 
                             MaterialTheme.colorScheme.onSurface
@@ -306,6 +321,20 @@ fun ChatScreen(viewModel: ChatViewModel) {
         )
     }
     
+    // Диалог управления MCP серверами
+    if (showMcpServerDialog) {
+        McpServerDialog(
+            servers = mcpServers,
+            onDismiss = { viewModel.hideMcpServerDialog() },
+            onAddServer = { name, url -> viewModel.addMcpServer(name, url) },
+            onConnect = { name, url -> viewModel.connectMcpServer(name, url) },
+            onDisconnect = { name -> viewModel.disconnectMcpServer(name) },
+            onRemove = { name -> viewModel.removeMcpServer(name) },
+            onConnectFromList = { urlList -> viewModel.connectMcpServersFromList(urlList) },
+            viewModel = viewModel
+        )
+    }
+    
     // Показ ошибок
     errorMessage?.let { error ->
         AlertDialog(
@@ -365,6 +394,243 @@ fun LoadHistoryDialog(
         dismissButton = {
             TextButton(onClick = onDismiss) {
                 Text("Отмена")
+            }
+        }
+    )
+}
+
+@Composable
+fun McpServerDialog(
+    servers: List<ChatViewModel.McpServerConfig>,
+    onDismiss: () -> Unit,
+    onAddServer: (String, String) -> Unit,
+    onConnect: (String, String) -> Unit,
+    onDisconnect: (String) -> Unit,
+    onRemove: (String) -> Unit,
+    onConnectFromList: ((List<String>) -> Unit)? = null,
+    viewModel: ChatViewModel? = null
+) {
+    var serverName by remember { mutableStateOf("") }
+    var serverUrl by remember { mutableStateOf("") }
+    var showAddForm by remember { mutableStateOf(false) }
+    var showBulkAddForm by remember { mutableStateOf(false) }
+    var bulkServerList by remember { mutableStateOf("") }
+    
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("MCP Серверы") },
+        text = {
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .heightIn(max = 400.dp),
+                verticalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                if (showAddForm) {
+                    OutlinedTextField(
+                        value = serverName,
+                        onValueChange = { serverName = it },
+                        modifier = Modifier.fillMaxWidth(),
+                        label = { Text("Имя сервера") },
+                        placeholder = { Text("Например: my-mcp-server") }
+                    )
+                    OutlinedTextField(
+                        value = serverUrl,
+                        onValueChange = { serverUrl = it },
+                        modifier = Modifier.fillMaxWidth(),
+                        label = { Text("URL сервера") },
+                        placeholder = { Text("https://example.com/mcp") }
+                    )
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        Button(
+                            onClick = {
+                                if (serverName.isNotBlank() && serverUrl.isNotBlank()) {
+                                    onAddServer(serverName, serverUrl)
+                                    onConnect(serverName, serverUrl)
+                                    serverName = ""
+                                    serverUrl = ""
+                                    showAddForm = false
+                                }
+                            },
+                            modifier = Modifier.weight(1f)
+                        ) {
+                            Text("Добавить и подключить")
+                        }
+                        TextButton(
+                            onClick = { showAddForm = false },
+                            modifier = Modifier.weight(1f)
+                        ) {
+                            Text("Отмена")
+                        }
+                    }
+                    HorizontalDivider(modifier = Modifier.padding(vertical = 8.dp))
+                } else {
+                    Column(
+                        modifier = Modifier.fillMaxWidth(),
+                        verticalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.spacedBy(8.dp)
+                        ) {
+                            Button(
+                                onClick = { showAddForm = true },
+                                modifier = Modifier.weight(1f)
+                            ) {
+                                Text("+ Добавить сервер")
+                            }
+                            if (onConnectFromList != null) {
+                                Button(
+                                    onClick = { showBulkAddForm = true },
+                                    modifier = Modifier.weight(1f)
+                                ) {
+                                    Text("+ Массовое добавление")
+                                }
+                            }
+                        }
+                        if (viewModel != null) {
+                            TextButton(
+                                onClick = {
+                                    // Используем функцию из ViewModel для импорта
+                                    viewModel.importPopularMcpServers()
+                                },
+                                modifier = Modifier.fillMaxWidth()
+                            ) {
+                                Text("📥 Импортировать популярные серверы (mcpservers.org)")
+                            }
+                        }
+                    }
+                }
+                
+                if (showBulkAddForm) {
+                    Spacer(modifier = Modifier.height(8.dp))
+                    HorizontalDivider()
+                    Spacer(modifier = Modifier.height(8.dp))
+                    Text(
+                        text = "Введите список URL серверов (по одному на строку):",
+                        style = MaterialTheme.typography.bodyMedium
+                    )
+                    Text(
+                        text = "Формат: \"имя:URL\" или просто \"URL\"",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                    Text(
+                        text = "Примеры с mcpservers.org можно найти на: https://mcpservers.org/remote-mcp-servers",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.primary
+                    )
+                    Spacer(modifier = Modifier.height(8.dp))
+                    OutlinedTextField(
+                        value = bulkServerList,
+                        onValueChange = { bulkServerList = it },
+                        modifier = Modifier.fillMaxWidth(),
+                        label = { Text("URL серверов") },
+                        placeholder = { 
+                            Text(
+                                "Notion:https://notion.mcpservers.org\n" +
+                                "Sentry:https://sentry.mcpservers.org\n" +
+                                "или просто:\n" +
+                                "https://notion.mcpservers.org\n" +
+                                "https://sentry.mcpservers.org"
+                            )
+                        },
+                        minLines = 8,
+                        maxLines = 15
+                    )
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        Button(
+                            onClick = {
+                                val urlList = bulkServerList.lines()
+                                    .map { it.trim() }
+                                    .filter { it.isNotBlank() }
+                                if (urlList.isNotEmpty()) {
+                                    onConnectFromList?.invoke(urlList)
+                                    bulkServerList = ""
+                                    showBulkAddForm = false
+                                }
+                            },
+                            modifier = Modifier.weight(1f),
+                            enabled = bulkServerList.trim().isNotBlank()
+                        ) {
+                            Text("Подключить все")
+                        }
+                        TextButton(
+                            onClick = { 
+                                showBulkAddForm = false
+                                bulkServerList = ""
+                            },
+                            modifier = Modifier.weight(1f)
+                        ) {
+                            Text("Отмена")
+                        }
+                    }
+                }
+                
+                if (servers.isNotEmpty()) {
+                    HorizontalDivider()
+                    servers.forEach { server ->
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Column(modifier = Modifier.weight(1f)) {
+                                Text(
+                                    text = server.name,
+                                    style = MaterialTheme.typography.bodyLarge
+                                )
+                                Text(
+                                    text = server.url,
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                                )
+                                Text(
+                                    text = if (server.connected) "✓ Подключен" else "Не подключен",
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = if (server.connected) 
+                                        MaterialTheme.colorScheme.primary 
+                                    else 
+                                        MaterialTheme.colorScheme.onSurfaceVariant
+                                )
+                            }
+                            Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                                if (!server.connected) {
+                                    TextButton(onClick = { onConnect(server.name, server.url) }) {
+                                        Text("Подключить")
+                                    }
+                                } else {
+                                    TextButton(onClick = { onDisconnect(server.name) }) {
+                                        Text("Отключить")
+                                    }
+                                }
+                                TextButton(onClick = { onRemove(server.name) }) {
+                                    Text("Удалить", color = MaterialTheme.colorScheme.error)
+                                }
+                            }
+                        }
+                        if (server != servers.last()) {
+                            HorizontalDivider()
+                        }
+                    }
+                } else if (!showAddForm) {
+                    Text(
+                        text = "Нет добавленных серверов",
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+            }
+        },
+        confirmButton = {
+            TextButton(onClick = onDismiss) {
+                Text("Закрыть")
             }
         }
     )
