@@ -2,6 +2,7 @@ package org.example.demo.chat
 
 import androidx.compose.runtime.*
 import kotlinx.coroutines.*
+import kotlinx.serialization.json.*
 import kotlin.random.Random
 
 enum class DialogueMode {
@@ -307,11 +308,15 @@ class ChatViewModel(
                     null
                 }
                 
+                // Проверяем, нужно ли вызвать MCP инструменты перед отправкой к AI
+                val mcpToolResults = checkAndCallMcpTools(text)
+                
                 // Формируем список сообщений для отправки:
                 // 1. Загруженная история (если есть) - не показывается в UI
                 // 2. Если есть summary, добавляем его как системное сообщение
-                // 3. Исключаем сообщения пользователя, которые уже сжаты в summary
-                // 4. Добавляем остальные сообщения (ответы AI и новые сообщения пользователя)
+                // 3. Результаты MCP инструментов (если были вызваны)
+                // 4. Исключаем сообщения пользователя, которые уже сжаты в summary
+                // 5. Добавляем остальные сообщения (ответы AI и новые сообщения пользователя)
                 val messagesToSend = buildList {
                     // Добавляем загруженную историю в начало (если есть)
                     _loadedHistory?.let { loaded ->
@@ -326,6 +331,24 @@ class ChatViewModel(
                             role = MessageRole.SYSTEM
                         ))
                     }
+                    
+                    // Добавляем результаты MCP инструментов как системные сообщения
+                    if (mcpToolResults.isNotEmpty()) {
+                        val toolContext = buildString {
+                            append("Доступна следующая информация из внешних инструментов:\n\n")
+                            mcpToolResults.forEach { (toolName, result) ->
+                                append("[$toolName]: $result\n\n")
+                            }
+                            append("Используй эту информацию для ответа на вопрос пользователя.")
+                        }
+                        add(Message(
+                            id = generateId(),
+                            content = toolContext,
+                            role = MessageRole.SYSTEM
+                        ))
+                        AppLogger.d(TAG, "Added MCP tool results to context: ${mcpToolResults.keys.joinToString()}")
+                    }
+                    
                     // Добавляем сообщения из сессии, исключая сжатые сообщения (и пользователя, и AI)
                     _session.value.messages.forEach { message ->
                         // Включаем только те сообщения, которые не сжаты
@@ -926,6 +949,229 @@ class ChatViewModel(
         if (servers.isNotEmpty()) {
             connectMcpServersFromList(servers)
         }
+    }
+    
+    /**
+     * Вызывает MCP инструмент через подключенный MCP сервер
+     * Используется агентом для получения данных из внешних источников
+     */
+    suspend fun callMcpTool(serverName: String, toolName: String, arguments: kotlinx.serialization.json.JsonObject?): String? {
+        return try {
+            val client = mcpClientManager?.getClient(serverName)
+            if (client == null) {
+                AppLogger.w(TAG, "MCP client '$serverName' not found")
+                return null
+            }
+            
+            AppLogger.d(TAG, "Calling MCP tool: $toolName on server: $serverName")
+            val result = client.callTool(toolName, arguments)
+            
+            if (result != null && !result.isError) {
+                val content = result.content.firstOrNull()?.text ?: "No result"
+                AppLogger.d(TAG, "MCP tool result: $content")
+                content
+            } else {
+                val errorMsg = result?.content?.firstOrNull()?.text ?: "Unknown error"
+                AppLogger.e(TAG, "MCP tool error: $errorMsg")
+                "Ошибка при вызове инструмента: $errorMsg"
+            }
+        } catch (e: Exception) {
+            AppLogger.e(TAG, "Failed to call MCP tool: ${e.message}", e)
+            "Ошибка: ${e.message}"
+        }
+    }
+    
+    /**
+     * Получает список доступных инструментов с подключенного MCP сервера
+     */
+    suspend fun getMcpTools(serverName: String): List<org.example.demo.chat.McpTool> {
+        return try {
+            val client = mcpClientManager?.getClient(serverName)
+            client?.listTools() ?: emptyList()
+        } catch (e: Exception) {
+            AppLogger.e(TAG, "Failed to get MCP tools: ${e.message}", e)
+            emptyList()
+        }
+    }
+    
+    /**
+     * Проверяет запрос пользователя и автоматически вызывает соответствующие MCP инструменты
+     * Возвращает карту результатов: имя инструмента -> результат
+     */
+    private suspend fun checkAndCallMcpTools(userMessage: String): Map<String, String> {
+        val results = mutableMapOf<String, String>()
+        
+        if (mcpClientManager == null) {
+            AppLogger.d(TAG, "MCP client manager not available")
+            return results
+        }
+        
+        val lowerMessage = userMessage.lowercase()
+        
+        // Проверяем упоминания трекера/задач
+        val trackerKeywords = listOf(
+            "трекер", "задач", "таск", "issue", "yandex tracker",
+            "сколько задач", "открытые задачи", "список задач",
+            "создать задачу", "добавить задачу", "новая задача"
+        )
+        
+        val hasTrackerMention = trackerKeywords.any { keyword ->
+            lowerMessage.contains(keyword, ignoreCase = true)
+        }
+        
+        if (hasTrackerMention) {
+            AppLogger.d(TAG, "Detected tracker-related query, checking for MCP servers...")
+            
+            // Ищем подключенные MCP серверы через менеджер
+            val serversToCheck = mcpClientManager?.getConnectedServers() ?: emptyList()
+            AppLogger.d(TAG, "Connected MCP servers: ${serversToCheck.joinToString()}")
+            
+            // Пытаемся найти сервер с инструментом yandex_tracker
+            var foundServer = false
+            for (serverName in serversToCheck) {
+                if (foundServer) break
+                
+                try {
+                    val tools = getMcpTools(serverName)
+                    val trackerTool = tools.find { it.name == "yandex_tracker" }
+                    
+                    if (trackerTool != null) {
+                        AppLogger.d(TAG, "Found yandex_tracker tool on server: $serverName")
+                        foundServer = true
+                        
+                        // Определяем, какое действие нужно вызвать
+                        val taskIdMatch = Regex("test-\\d+", RegexOption.IGNORE_CASE).find(lowerMessage)
+                        val taskId = taskIdMatch?.value?.uppercase()
+                        
+                        // Проверяем, нужно ли создать задачу
+                        val shouldCreateTask = lowerMessage.contains("создать") || 
+                                               lowerMessage.contains("добавить") || 
+                                               lowerMessage.contains("новая задача")
+                        
+                        val action = when {
+                            shouldCreateTask -> {
+                                // Извлекаем название задачи из сообщения
+                                // Ищем паттерны типа "создать задачу: название" или "добавить задачу название"
+                                val createPatterns = listOf(
+                                    Regex("создать задачу[\\s:]+(.+)", RegexOption.IGNORE_CASE),
+                                    Regex("добавить задачу[\\s:]+(.+)", RegexOption.IGNORE_CASE),
+                                    Regex("новая задача[\\s:]+(.+)", RegexOption.IGNORE_CASE),
+                                    Regex("создай задачу[\\s:]+(.+)", RegexOption.IGNORE_CASE)
+                                )
+                                
+                                var taskSummary: String? = null
+                                var taskDescription: String? = null
+                                
+                                for (pattern in createPatterns) {
+                                    val match = pattern.find(userMessage)
+                                    if (match != null) {
+                                        val extracted = match.groupValues[1].trim()
+                                        // Разделяем на название и описание (если есть)
+                                        val parts = extracted.split(Regex("[,;]|\\n"), limit = 2)
+                                        taskSummary = parts[0].trim()
+                                        if (parts.size > 1) {
+                                            taskDescription = parts[1].trim()
+                                        }
+                                        break
+                                    }
+                                }
+                                
+                                // Если не нашли паттерн, используем весь текст после ключевых слов
+                                if (taskSummary == null) {
+                                    val keywordPattern = Regex("создать|добавить|новая", RegexOption.IGNORE_CASE)
+                                    val match = keywordPattern.find(userMessage)
+                                    if (match != null) {
+                                        val afterKeywords = userMessage.substring(match.range.last + 1).trim()
+                                        if (afterKeywords.isNotEmpty()) {
+                                            val parts = afterKeywords.split(Regex("[,;]|\\n"), limit = 2)
+                                            taskSummary = parts[0].trim()
+                                            if (parts.size > 1) {
+                                                taskDescription = parts[1].trim()
+                                            }
+                                        }
+                                    }
+                                }
+                                
+                                // Если все еще нет названия, используем часть сообщения
+                                if (taskSummary.isNullOrBlank()) {
+                                    // Берем первые 50 символов после ключевых слов как название
+                                    val keywords = listOf("создать", "добавить", "новая")
+                                    val startIndex = keywords.map { 
+                                        userMessage.lowercase().indexOf(it) 
+                                    }.filter { it >= 0 }.minOrNull() ?: 0
+                                    
+                                    val afterStartMatch = Regex("задач[ауеи]?[\\s:]+(.+)", RegexOption.IGNORE_CASE).find(userMessage.substring(startIndex))
+                                    val afterStart = afterStartMatch?.groupValues?.get(1) ?: ""
+                                    taskSummary = afterStart.take(100).trim().ifEmpty { "Новая задача" }
+                                }
+                                
+                                // Вызываем инструмент для создания задачи
+                                val result = callMcpTool(
+                                    serverName = serverName,
+                                    toolName = "yandex_tracker",
+                                    arguments = buildJsonObject {
+                                        put("action", "create_task")
+                                        put("summary", taskSummary ?: "Новая задача")
+                                        if (taskDescription != null) {
+                                            put("description", taskDescription)
+                                        }
+                                        put("queue", "TEST")
+                                    }
+                                )
+                                
+                                if (result != null && !result.startsWith("Ошибка")) {
+                                    results["yandex_tracker"] = result
+                                }
+                                null // Помечаем, что уже обработали
+                            }
+                            taskId != null -> {
+                                // Получаем конкретную задачу
+                                val result = callMcpTool(
+                                    serverName = serverName,
+                                    toolName = "yandex_tracker",
+                                    arguments = buildJsonObject {
+                                        put("action", "get_task")
+                                        put("task_id", taskId)
+                                        put("queue", "TEST")
+                                    }
+                                )
+                                if (result != null && !result.startsWith("Ошибка")) {
+                                    results["yandex_tracker"] = result
+                                }
+                                null // Помечаем, что уже обработали
+                            }
+                            lowerMessage.contains("сколько") || lowerMessage.contains("количество") -> "count_open_tasks"
+                            lowerMessage.contains("список") || lowerMessage.contains("все") -> "get_open_tasks"
+                            else -> "count_open_tasks" // По умолчанию подсчитываем
+                        }
+                        
+                        if (action != null) {
+                            val result = callMcpTool(
+                                serverName = serverName,
+                                toolName = "yandex_tracker",
+                                arguments = buildJsonObject {
+                                    put("action", action)
+                                    put("queue", "TEST")
+                                }
+                            )
+                            
+                            if (result != null && !result.startsWith("Ошибка")) {
+                                results["yandex_tracker"] = result
+                                AppLogger.i(TAG, "Successfully called yandex_tracker tool, result: ${result.take(100)}...")
+                            } else {
+                                AppLogger.w(TAG, "Failed to get result from yandex_tracker: $result")
+                            }
+                        }
+                        
+                        break // Используем первый найденный сервер
+                    }
+                } catch (e: Exception) {
+                    AppLogger.e(TAG, "Error checking tools on server $serverName: ${e.message}", e)
+                }
+            }
+        }
+        
+        return results
     }
     
     private fun generateId(): String {

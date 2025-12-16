@@ -9,6 +9,7 @@ import io.ktor.client.request.forms.*
 import io.ktor.http.*
 import io.ktor.serialization.kotlinx.json.*
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.withContext
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.Json
@@ -30,6 +31,7 @@ class GigaChatApiClient(
     
     private var accessToken: String = ""
     private var tokenExpiresAt: Long? = null
+    private var lastRequestTime: Long = 0
     
     fun setAccessToken(token: String, expiresAt: Long? = null) {
         accessToken = token
@@ -45,9 +47,25 @@ class GigaChatApiClient(
         return currentTime >= (tokenExpiresAt!! - bufferTime)
     }
     
+    /**
+     * Добавляет задержку между запросами для предотвращения rate limiting
+     */
+    private suspend fun waitIfNeeded() {
+        val now = currentTimeMillis()
+        val timeSinceLastRequest = now - lastRequestTime
+        if (timeSinceLastRequest < MIN_REQUEST_INTERVAL_MS) {
+            val delay = MIN_REQUEST_INTERVAL_MS - timeSinceLastRequest
+            AppLogger.d(TAG, "Rate limiting: waiting ${delay}ms before next request")
+            delay(delay)
+        }
+        lastRequestTime = currentTimeMillis()
+    }
+    
     private suspend fun refreshTokenIfNeeded() {
         if (accessToken.isBlank() || isTokenExpired()) {
             AppLogger.d(TAG, "Token expired or missing, refreshing...")
+            // Добавляем задержку перед запросом токена, чтобы избежать rate limiting
+            waitIfNeeded()
             val newToken = getAccessToken()
             // expires_at будет установлен в getAccessToken
         }
@@ -58,6 +76,7 @@ class GigaChatApiClient(
         private const val OAUTH_URL = "https://ngw.devices.sberbank.ru:9443/api/v2/oauth"
         private const val TAG = "GigaChatApiClient"
         private const val MODEL = "GigaChat"
+        private const val MIN_REQUEST_INTERVAL_MS = 2000L // Минимальная задержка 2 секунды между запросами
         
         private const val AUTHORIZATION_KEY = "MDE5YWRhYTktNmIxZi03M2QyLWIzODctOTQ4NWIzOTdhNTVmOjI0MGY0MzcxLTc2ZWYtNGMzMC04YTk5LTFkYjA1ZjgwNWQ1NQ=="
     }
@@ -206,12 +225,24 @@ class GigaChatApiClient(
         }
     }
     
-    override suspend fun sendMessage(messages: List<Message>, temperature: Float, maxTokens: Int?): String = withContext(Dispatchers.Default) {
+    override suspend fun sendMessage(messages: List<Message>, temperature: Float, maxTokens: Int?): String {
+        return sendMessageInternal(messages, temperature, maxTokens, retryCount = 0)
+    }
+    
+    private suspend fun sendMessageInternal(
+        messages: List<Message>, 
+        temperature: Float, 
+        maxTokens: Int?,
+        retryCount: Int = 0
+    ): String = withContext(Dispatchers.Default) {
         try {
+            // Добавляем задержку между запросами для предотвращения rate limiting
+            waitIfNeeded()
+            
             // Проверяем и обновляем токен при необходимости
             refreshTokenIfNeeded()
             
-            AppLogger.d(TAG, "Sending message to API: $API_URL")
+            AppLogger.d(TAG, "Sending message to API: $API_URL (retry: $retryCount)")
             AppLogger.d(TAG, "Messages count: ${messages.size}, temperature: $temperature, maxTokens: $maxTokens")
             
             val chatMessages = messages.map { message ->
@@ -260,20 +291,39 @@ class GigaChatApiClient(
                     when (statusCode) {
                         401 -> {
                             // Токен истек или недействителен, пытаемся обновить
-                            AppLogger.w(TAG, "Received 401, attempting to refresh token...")
-                            try {
-                                refreshTokenIfNeeded()
-                                // Повторяем запрос с новым токеном
-                                AppLogger.d(TAG, "Retrying request with refreshed token")
-                                return@withContext sendMessage(messages, temperature, maxTokens)
-                            } catch (refreshError: Exception) {
-                                AppLogger.e(TAG, "Failed to refresh token", refreshError)
+                            if (retryCount < 1) { // Максимум 1 retry для 401
+                                AppLogger.w(TAG, "Received 401, attempting to refresh token...")
+                                try {
+                                    refreshTokenIfNeeded()
+                                    // Повторяем запрос с новым токеном
+                                    AppLogger.d(TAG, "Retrying request with refreshed token")
+                                    return@withContext sendMessageInternal(messages, temperature, maxTokens, retryCount + 1)
+                                } catch (refreshError: Exception) {
+                                    AppLogger.e(TAG, "Failed to refresh token", refreshError)
+                                    throw Exception("Unauthorized ($statusCode): $errorBody")
+                                }
+                            } else {
                                 throw Exception("Unauthorized ($statusCode): $errorBody")
                             }
                         }
                         403 -> throw Exception("Forbidden ($statusCode): $errorBody")
                         404 -> throw Exception("Not Found ($statusCode): $errorBody")
-                        429 -> throw Exception("Too Many Requests ($statusCode): $errorBody")
+                        429 -> {
+                            // Обрабатываем rate limiting с retry логикой
+                            if (retryCount < 2) { // Максимум 2 retry для 429
+                                val retryAfter = httpResponse.headers["Retry-After"]?.toLongOrNull()
+                                val delaySeconds = retryAfter ?: (5L * (retryCount + 1)) // Экспоненциальная задержка: 5, 10 секунд
+                                
+                                AppLogger.w(TAG, "Rate limit hit (429), waiting ${delaySeconds}s before retry (attempt ${retryCount + 1}/2). Error: $errorBody")
+                                delay(delaySeconds * 1000)
+                                
+                                // Повторяем запрос после задержки
+                                AppLogger.d(TAG, "Retrying request after rate limit delay")
+                                return@withContext sendMessageInternal(messages, temperature, maxTokens, retryCount + 1)
+                            } else {
+                                throw Exception("Too Many Requests ($statusCode): Rate limit exceeded after ${retryCount + 1} attempts. $errorBody")
+                            }
+                        }
                         500, 502, 503, 504 -> throw Exception("Server Error ($statusCode): $errorBody")
                         else -> throw Exception("HTTP $statusCode: $errorBody")
                     }
@@ -356,7 +406,7 @@ class HuggingFaceApiClient(
         private const val TAG = "HuggingFaceApiClient"
         // Встроенный токен для HuggingFace API
         // Замените на ваш токен или оставьте пустым для ручного ввода
-        private const val HUGGINGFACE_API_TOKEN = "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"
+        private const val HUGGINGFACE_API_TOKEN = "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"
     }
     
     fun setApiToken(token: String) {
