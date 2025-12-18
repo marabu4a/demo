@@ -202,3 +202,4 @@ suspend fun exampleAgentWithMcp() {
         httpClient.close()
     }
 }
+

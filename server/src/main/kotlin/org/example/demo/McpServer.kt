@@ -15,6 +15,9 @@ import kotlinx.serialization.json.*
 import kotlinx.serialization.encodeToString
 import kotlinx.serialization.decodeFromString
 
+// Импортируем reminderService из ReminderService.kt
+// reminderService определен как глобальный экземпляр в ReminderService.kt
+
 /**
  * Простой локальный MCP сервер для тестирования
  * Запускается на http://localhost:8080/mcp
@@ -82,6 +85,11 @@ fun Application.mcpModule() {
                 """.trimIndent(),
                 ContentType.Text.Plain
             )
+        }
+        
+        // POST для /mcp - основной endpoint для MCP запросов
+        post("/mcp") {
+            call.handleMcpRequest()
         }
         
         // Альтернативные endpoints
@@ -294,6 +302,66 @@ fun handleToolsList(request: McpRequest): JsonObject {
                         }
                     }
                 }
+                
+                // Инструмент 5: Reminder
+                addJsonObject {
+                    put("name", "reminder")
+                    put("description", "Управление напоминаниями. Создание, просмотр, удаление напоминаний и получение сводки.")
+                    putJsonObject("inputSchema") {
+                        put("type", "object")
+                        putJsonObject("properties") {
+                            putJsonObject("action") {
+                                put("type", "string")
+                                put("description", "Действие: 'create' - создать напоминание, 'list' - список напоминаний, 'get' - получить напоминание по ID, 'delete' - удалить напоминание, 'complete' - отметить как выполненное, 'get_summary' - получить сводку, 'get_due' - получить просроченные напоминания")
+                                putJsonArray("enum") {
+                                    add("create")
+                                    add("list")
+                                    add("get")
+                                    add("delete")
+                                    add("complete")
+                                    add("get_summary")
+                                    add("get_due")
+                                }
+                            }
+                            putJsonObject("id") {
+                                put("type", "string")
+                                put("description", "ID напоминания (требуется для action='get', 'delete', 'complete')")
+                            }
+                            putJsonObject("title") {
+                                put("type", "string")
+                                put("description", "Название напоминания (требуется для action='create')")
+                            }
+                            putJsonObject("description") {
+                                put("type", "string")
+                                put("description", "Описание напоминания (опционально, для action='create')")
+                            }
+                            putJsonObject("dueDate") {
+                                put("type", "number")
+                                put("description", "Время напоминания в миллисекундах (timestamp, опционально, для action='create')")
+                            }
+                            putJsonObject("priority") {
+                                put("type", "string")
+                                put("description", "Приоритет: 'low', 'normal', 'high' (опционально, по умолчанию 'normal', для action='create')")
+                                putJsonArray("enum") {
+                                    add("low")
+                                    add("normal")
+                                    add("high")
+                                }
+                            }
+                            putJsonObject("category") {
+                                put("type", "string")
+                                put("description", "Категория напоминания (опционально, для action='create')")
+                            }
+                            putJsonObject("includeCompleted") {
+                                put("type", "boolean")
+                                put("description", "Включать выполненные напоминания в список (опционально, по умолчанию true, для action='list')")
+                            }
+                        }
+                        putJsonArray("required") {
+                            add("action")
+                        }
+                    }
+                }
             }
         }
     }
@@ -302,7 +370,7 @@ fun handleToolsList(request: McpRequest): JsonObject {
 /**
  * Обрабатывает tools/call запрос
  */
-fun handleToolCall(request: McpRequest, requestBody: String): JsonObject {
+suspend fun handleToolCall(request: McpRequest, requestBody: String): JsonObject {
     val json = Json { ignoreUnknownKeys = true }
     val requestJson = json.parseToJsonElement(requestBody).jsonObject
     val params = requestJson["params"]?.jsonObject
@@ -473,6 +541,279 @@ fun handleToolCall(request: McpRequest, requestBody: String): JsonObject {
                         addJsonObject {
                             put("type", "text")
                             put("text", "Ошибка при работе с Яндекс Трекером: ${e.message}")
+                        }
+                    }
+                    put("isError", true)
+                }
+            }
+        }
+        "reminder" -> {
+            try {
+                val action = arguments?.get("action")?.jsonPrimitive?.content ?: ""
+                
+                val result = when (action) {
+                    "create" -> {
+                        val title = arguments?.get("title")?.jsonPrimitive?.content
+                        val description = arguments?.get("description")?.jsonPrimitive?.content
+                        val dueDate = arguments?.get("dueDate")?.jsonPrimitive?.longOrNull
+                        val priority = arguments?.get("priority")?.jsonPrimitive?.content ?: "normal"
+                        val category = arguments?.get("category")?.jsonPrimitive?.content
+                        
+                        if (title.isNullOrBlank()) {
+                            buildJsonObject {
+                                putJsonArray("content") {
+                                    addJsonObject {
+                                        put("type", "text")
+                                        put("text", "Ошибка: требуется параметр 'title' для создания напоминания")
+                                    }
+                                }
+                                put("isError", true)
+                            }
+                        } else {
+                            val reminder = reminderService.createReminder(
+                                title = title,
+                                description = description,
+                                dueDate = dueDate,
+                                priority = priority,
+                                category = category
+                            )
+                            buildJsonObject {
+                                putJsonArray("content") {
+                                    addJsonObject {
+                                        put("type", "text")
+                                        put("text", "Напоминание создано!\n\nID: ${reminder.id}\nНазвание: ${reminder.title}\n${if (reminder.description != null) "Описание: ${reminder.description}\n" else ""}Приоритет: ${reminder.priority}\n${if (reminder.dueDate != null) "Напомнить: ${java.time.Instant.ofEpochMilli(reminder.dueDate).toString()}\n" else ""}${if (reminder.category != null) "Категория: ${reminder.category}\n" else ""}")
+                                    }
+                                }
+                                put("isError", false)
+                            }
+                        }
+                    }
+                    "list" -> {
+                        val includeCompleted = arguments?.get("includeCompleted")?.jsonPrimitive?.booleanOrNull ?: true
+                        val reminders = reminderService.getAllReminders(includeCompleted)
+                        
+                        if (reminders.isEmpty()) {
+                            buildJsonObject {
+                                putJsonArray("content") {
+                                    addJsonObject {
+                                        put("type", "text")
+                                        put("text", "Нет напоминаний")
+                                    }
+                                }
+                                put("isError", false)
+                            }
+                        } else {
+                            val formatter = java.time.format.DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm")
+                                .withZone(java.time.ZoneId.systemDefault())
+                            val listText = reminders.joinToString("\n\n") { reminder ->
+                                buildString {
+                                    append("ID: ${reminder.id}\n")
+                                    append("Название: ${reminder.title}\n")
+                                    if (reminder.description != null) {
+                                        append("Описание: ${reminder.description}\n")
+                                    }
+                                    append("Приоритет: ${reminder.priority}\n")
+                                    if (reminder.dueDate != null) {
+                                        append("Напомнить: ${formatter.format(java.time.Instant.ofEpochMilli(reminder.dueDate))}\n")
+                                    }
+                                    if (reminder.category != null) {
+                                        append("Категория: ${reminder.category}\n")
+                                    }
+                                    append("Статус: ${if (reminder.completed) "✅ Выполнено" else "⏳ Ожидает"}")
+                                }
+                            }
+                            buildJsonObject {
+                                putJsonArray("content") {
+                                    addJsonObject {
+                                        put("type", "text")
+                                        put("text", "Список напоминаний (${reminders.size}):\n\n$listText")
+                                    }
+                                }
+                                put("isError", false)
+                            }
+                        }
+                    }
+                    "get" -> {
+                        val id = arguments?.get("id")?.jsonPrimitive?.content
+                        if (id.isNullOrBlank()) {
+                            buildJsonObject {
+                                putJsonArray("content") {
+                                    addJsonObject {
+                                        put("type", "text")
+                                        put("text", "Ошибка: требуется параметр 'id' для получения напоминания")
+                                    }
+                                }
+                                put("isError", true)
+                            }
+                        } else {
+                            val reminder = reminderService.getReminderById(id)
+                            if (reminder != null) {
+                                val formatter = java.time.format.DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm")
+                                    .withZone(java.time.ZoneId.systemDefault())
+                                buildJsonObject {
+                                    putJsonArray("content") {
+                                        addJsonObject {
+                                            put("type", "text")
+                                            put("text", "Напоминание:\n\nID: ${reminder.id}\nНазвание: ${reminder.title}\n${if (reminder.description != null) "Описание: ${reminder.description}\n" else ""}Приоритет: ${reminder.priority}\n${if (reminder.dueDate != null) "Напомнить: ${formatter.format(java.time.Instant.ofEpochMilli(reminder.dueDate))}\n" else ""}${if (reminder.category != null) "Категория: ${reminder.category}\n" else ""}Статус: ${if (reminder.completed) "✅ Выполнено" else "⏳ Ожидает"}\nСоздано: ${formatter.format(java.time.Instant.ofEpochMilli(reminder.createdAt))}")
+                                        }
+                                    }
+                                    put("isError", false)
+                                }
+                            } else {
+                                buildJsonObject {
+                                    putJsonArray("content") {
+                                        addJsonObject {
+                                            put("type", "text")
+                                            put("text", "Напоминание с ID '$id' не найдено")
+                                        }
+                                    }
+                                    put("isError", true)
+                                }
+                            }
+                        }
+                    }
+                    "delete" -> {
+                        val id = arguments?.get("id")?.jsonPrimitive?.content
+                        if (id.isNullOrBlank()) {
+                            buildJsonObject {
+                                putJsonArray("content") {
+                                    addJsonObject {
+                                        put("type", "text")
+                                        put("text", "Ошибка: требуется параметр 'id' для удаления напоминания")
+                                    }
+                                }
+                                put("isError", true)
+                            }
+                        } else {
+                            val deleted = reminderService.deleteReminder(id)
+                            if (deleted) {
+                                buildJsonObject {
+                                    putJsonArray("content") {
+                                        addJsonObject {
+                                            put("type", "text")
+                                            put("text", "Напоминание с ID '$id' успешно удалено")
+                                        }
+                                    }
+                                    put("isError", false)
+                                }
+                            } else {
+                                buildJsonObject {
+                                    putJsonArray("content") {
+                                        addJsonObject {
+                                            put("type", "text")
+                                            put("text", "Напоминание с ID '$id' не найдено")
+                                        }
+                                    }
+                                    put("isError", true)
+                                }
+                            }
+                        }
+                    }
+                    "complete" -> {
+                        val id = arguments?.get("id")?.jsonPrimitive?.content
+                        if (id.isNullOrBlank()) {
+                            buildJsonObject {
+                                putJsonArray("content") {
+                                    addJsonObject {
+                                        put("type", "text")
+                                        put("text", "Ошибка: требуется параметр 'id' для отметки напоминания как выполненного")
+                                    }
+                                }
+                                put("isError", true)
+                            }
+                        } else {
+                            val completed = reminderService.completeReminder(id)
+                            if (completed) {
+                                buildJsonObject {
+                                    putJsonArray("content") {
+                                        addJsonObject {
+                                            put("type", "text")
+                                            put("text", "Напоминание с ID '$id' отмечено как выполненное")
+                                        }
+                                    }
+                                    put("isError", false)
+                                }
+                            } else {
+                                buildJsonObject {
+                                    putJsonArray("content") {
+                                        addJsonObject {
+                                            put("type", "text")
+                                            put("text", "Напоминание с ID '$id' не найдено или уже выполнено")
+                                        }
+                                    }
+                                    put("isError", true)
+                                }
+                            }
+                        }
+                    }
+                    "get_summary" -> {
+                        val summary = reminderService.getSummary()
+                        buildJsonObject {
+                            putJsonArray("content") {
+                                addJsonObject {
+                                    put("type", "text")
+                                    put("text", summary)
+                                }
+                            }
+                            put("isError", false)
+                        }
+                    }
+                    "get_due" -> {
+                        val dueReminders = reminderService.getDueReminders()
+                        if (dueReminders.isEmpty()) {
+                            buildJsonObject {
+                                putJsonArray("content") {
+                                    addJsonObject {
+                                        put("type", "text")
+                                        put("text", "Нет просроченных напоминаний")
+                                    }
+                                }
+                                put("isError", false)
+                            }
+                        } else {
+                            val formatter = java.time.format.DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm")
+                                .withZone(java.time.ZoneId.systemDefault())
+                            val listText = dueReminders.joinToString("\n\n") { reminder ->
+                                buildString {
+                                    append("ID: ${reminder.id}\n")
+                                    append("Название: ${reminder.title}\n")
+                                    if (reminder.description != null) {
+                                        append("Описание: ${reminder.description}\n")
+                                    }
+                                    append("Напомнить: ${formatter.format(java.time.Instant.ofEpochMilli(reminder.dueDate!!))}\n")
+                                    append("Приоритет: ${reminder.priority}")
+                                }
+                            }
+                            buildJsonObject {
+                                putJsonArray("content") {
+                                    addJsonObject {
+                                        put("type", "text")
+                                        put("text", "Просроченные напоминания (${dueReminders.size}):\n\n$listText")
+                                    }
+                                }
+                                put("isError", false)
+                            }
+                        }
+                    }
+                    else -> {
+                        buildJsonObject {
+                            putJsonArray("content") {
+                                addJsonObject {
+                                    put("type", "text")
+                                    put("text", "Неизвестное действие: $action. Доступные действия: create, list, get, delete, complete, get_summary, get_due")
+                                }
+                            }
+                            put("isError", true)
+                        }
+                    }
+                }
+                result
+            } catch (e: Exception) {
+                buildJsonObject {
+                    putJsonArray("content") {
+                        addJsonObject {
+                            put("type", "text")
+                            put("text", "Ошибка при работе с напоминаниями: ${e.message}")
                         }
                     }
                     put("isError", true)
@@ -678,3 +1019,5 @@ data class McpRequest(
     val method: String,
     val params: JsonElement? = null
 )
+
+
