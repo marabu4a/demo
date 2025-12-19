@@ -301,3 +301,4 @@ curl -X POST http://localhost:8080/mcp \
 
 3. Или откройте `test-mcp-requests.http` в IntelliJ IDEA и запустите запросы оттуда.
 
+

@@ -362,6 +362,68 @@ fun handleToolsList(request: McpRequest): JsonObject {
                         }
                     }
                 }
+                
+                // Инструмент 6: Save Information
+                addJsonObject {
+                    put("name", "save_info")
+                    put("description", "Сохраняет информацию в JSON файл на устройстве пользователя. Поддерживает сохранение содержимого веб-страниц, summary и метаданных.")
+                    putJsonObject("inputSchema") {
+                        put("type", "object")
+                        putJsonObject("properties") {
+                            putJsonObject("action") {
+                                put("type", "string")
+                                put("description", "Действие: 'save' - сохранить информацию, 'get' - получить по ID, 'search' - поиск по тексту, 'search_by_tags' - поиск по тегам, 'list' - список всей информации, 'stats' - статистика, 'delete' - удалить")
+                                putJsonArray("enum") {
+                                    add("save")
+                                    add("get")
+                                    add("search")
+                                    add("search_by_tags")
+                                    add("list")
+                                    add("stats")
+                                    add("delete")
+                                }
+                            }
+                            putJsonObject("title") {
+                                put("type", "string")
+                                put("description", "Заголовок информации (требуется для action='save')")
+                            }
+                            putJsonObject("content") {
+                                put("type", "string")
+                                put("description", "Содержимое информации (требуется для action='save')")
+                            }
+                            putJsonObject("source") {
+                                put("type", "string")
+                                put("description", "Источник информации, например URL (опционально, для action='save')")
+                            }
+                            putJsonObject("summary") {
+                                put("type", "string")
+                                put("description", "Краткая сводка информации (опционально, для action='save')")
+                            }
+                            putJsonObject("tags") {
+                                put("type", "array")
+                                put("description", "Теги для категоризации (опционально, для action='save')")
+                                putJsonObject("items") {
+                                    put("type", "string")
+                                }
+                            }
+                            putJsonObject("metadata") {
+                                put("type", "object")
+                                put("description", "Дополнительные метаданные (опционально, для action='save')")
+                            }
+                            putJsonObject("id") {
+                                put("type", "string")
+                                put("description", "ID информации (требуется для action='get' или 'delete')")
+                            }
+                            putJsonObject("query") {
+                                put("type", "string")
+                                put("description", "Поисковый запрос (требуется для action='search')")
+                            }
+                        }
+                        putJsonArray("required") {
+                            add("action")
+                        }
+                    }
+                }
             }
         }
     }
@@ -820,6 +882,272 @@ suspend fun handleToolCall(request: McpRequest, requestBody: String): JsonObject
                 }
             }
         }
+        
+        "save_info" -> {
+            try {
+                val action = arguments?.get("action")?.jsonPrimitive?.content ?: ""
+                
+                val result = when (action) {
+                    "save" -> {
+                        val title = arguments?.get("title")?.jsonPrimitive?.content
+                        val content = arguments?.get("content")?.jsonPrimitive?.content
+                        val source = arguments?.get("source")?.jsonPrimitive?.content
+                        val summary = arguments?.get("summary")?.jsonPrimitive?.content
+                        val tags = arguments?.get("tags")?.jsonArray?.mapNotNull { it.jsonPrimitive.content } ?: emptyList()
+                        val metadata = arguments?.get("metadata")?.jsonObject?.let { metaObj ->
+                            metaObj.entries.associate { 
+                                it.key to (it.value.jsonPrimitive.content)
+                            }
+                        } ?: emptyMap()
+                        
+                        if (title.isNullOrBlank() || content.isNullOrBlank()) {
+                            buildJsonObject {
+                                putJsonArray("content") {
+                                    addJsonObject {
+                                        put("type", "text")
+                                        put("text", "Ошибка: требуются параметры 'title' и 'content' для сохранения информации")
+                                    }
+                                }
+                                put("isError", true)
+                            }
+                        } else {
+                            val info = InformationStorageService.save(
+                                title = title,
+                                content = content,
+                                source = source,
+                                summary = summary,
+                                metadata = metadata,
+                                tags = tags
+                            )
+                            buildJsonObject {
+                                putJsonArray("content") {
+                                    addJsonObject {
+                                        put("type", "text")
+                                        put("text", buildJsonObject {
+                                            put("id", info.id)
+                                            put("title", info.title)
+                                            put("summary", info.summary ?: "")
+                                            put("source", info.source ?: "")
+                                            put("createdAt", info.createdAt)
+                                            put("message", "Информация успешно сохранена")
+                                        }.toString())
+                                    }
+                                }
+                                put("isError", false)
+                            }
+                        }
+                    }
+                    "get" -> {
+                        val id = arguments?.get("id")?.jsonPrimitive?.content
+                        if (id.isNullOrBlank()) {
+                            buildJsonObject {
+                                putJsonArray("content") {
+                                    addJsonObject {
+                                        put("type", "text")
+                                        put("text", "Ошибка: требуется параметр 'id' для получения информации")
+                                    }
+                                }
+                                put("isError", true)
+                            }
+                        } else {
+                            val info = InformationStorageService.getById(id)
+                            if (info != null) {
+                                buildJsonObject {
+                                    putJsonArray("content") {
+                                        addJsonObject {
+                                            put("type", "text")
+                                            put("text", Json { prettyPrint = true }.encodeToString(info))
+                                        }
+                                    }
+                                    put("isError", false)
+                                }
+                            } else {
+                                buildJsonObject {
+                                    putJsonArray("content") {
+                                        addJsonObject {
+                                            put("type", "text")
+                                            put("text", "Информация с ID '$id' не найдена")
+                                        }
+                                    }
+                                    put("isError", true)
+                                }
+                            }
+                        }
+                    }
+                    "search" -> {
+                        val query = arguments?.get("query")?.jsonPrimitive?.content
+                        if (query.isNullOrBlank()) {
+                            buildJsonObject {
+                                putJsonArray("content") {
+                                    addJsonObject {
+                                        put("type", "text")
+                                        put("text", "Ошибка: требуется параметр 'query' для поиска")
+                                    }
+                                }
+                                put("isError", true)
+                            }
+                        } else {
+                            val results = InformationStorageService.searchByText(query)
+                            buildJsonObject {
+                                putJsonArray("content") {
+                                    addJsonObject {
+                                        put("type", "text")
+                                        put("text", buildJsonObject {
+                                            put("count", results.size)
+                                            putJsonArray("results") {
+                                                results.forEach { info ->
+                                                    addJsonObject {
+                                                        put("id", info.id)
+                                                        put("title", info.title)
+                                                        put("summary", info.summary ?: "")
+                                                        put("source", info.source ?: "")
+                                                        put("createdAt", info.createdAt)
+                                                    }
+                                                }
+                                            }
+                                        }.toString())
+                                    }
+                                }
+                                put("isError", false)
+                            }
+                        }
+                    }
+                    "search_by_tags" -> {
+                        val tags = arguments?.get("tags")?.jsonArray?.mapNotNull { it.jsonPrimitive.content } ?: emptyList()
+                        if (tags.isEmpty()) {
+                            buildJsonObject {
+                                putJsonArray("content") {
+                                    addJsonObject {
+                                        put("type", "text")
+                                        put("text", "Ошибка: требуется параметр 'tags' (массив) для поиска по тегам")
+                                    }
+                                }
+                                put("isError", true)
+                            }
+                        } else {
+                            val results = InformationStorageService.searchByTags(tags)
+                            buildJsonObject {
+                                putJsonArray("content") {
+                                    addJsonObject {
+                                        put("type", "text")
+                                        put("text", buildJsonObject {
+                                            put("count", results.size)
+                                            putJsonArray("tags") {
+                                                tags.forEach { add(it) }
+                                            }
+                                            putJsonArray("results") {
+                                                results.forEach { info ->
+                                                    addJsonObject {
+                                                        put("id", info.id)
+                                                        put("title", info.title)
+                                                        put("summary", info.summary ?: "")
+                                                        put("source", info.source ?: "")
+                                                        putJsonArray("tags") {
+                                                            info.tags.forEach { add(it) }
+                                                        }
+                                                        put("createdAt", info.createdAt)
+                                                    }
+                                                }
+                                            }
+                                        }.toString())
+                                    }
+                                }
+                                put("isError", false)
+                            }
+                        }
+                    }
+                    "list" -> {
+                        val allInfo = InformationStorageService.loadAll()
+                        buildJsonObject {
+                            putJsonArray("content") {
+                                addJsonObject {
+                                    put("type", "text")
+                                    put("text", buildJsonObject {
+                                        put("count", allInfo.size)
+                                        putJsonArray("items") {
+                                            allInfo.forEach { info ->
+                                                addJsonObject {
+                                                    put("id", info.id)
+                                                    put("title", info.title)
+                                                    put("summary", info.summary ?: "")
+                                                    put("source", info.source ?: "")
+                                                    put("createdAt", info.createdAt)
+                                                }
+                                            }
+                                        }
+                                    }.toString())
+                                }
+                            }
+                            put("isError", false)
+                        }
+                    }
+                    "stats" -> {
+                        val stats = InformationStorageService.getStats()
+                        buildJsonObject {
+                            putJsonArray("content") {
+                                addJsonObject {
+                                    put("type", "text")
+                                    put("text", Json { prettyPrint = true }.encodeToString(stats))
+                                }
+                            }
+                            put("isError", false)
+                        }
+                    }
+                    "delete" -> {
+                        val id = arguments?.get("id")?.jsonPrimitive?.content
+                        if (id.isNullOrBlank()) {
+                            buildJsonObject {
+                                putJsonArray("content") {
+                                    addJsonObject {
+                                        put("type", "text")
+                                        put("text", "Ошибка: требуется параметр 'id' для удаления")
+                                    }
+                                }
+                                put("isError", true)
+                            }
+                        } else {
+                            val deleted = InformationStorageService.delete(id)
+                            buildJsonObject {
+                                putJsonArray("content") {
+                                    addJsonObject {
+                                        put("type", "text")
+                                        put("text", if (deleted) {
+                                            "Информация с ID '$id' успешно удалена"
+                                        } else {
+                                            "Информация с ID '$id' не найдена"
+                                        })
+                                    }
+                                }
+                                put("isError", !deleted)
+                            }
+                        }
+                    }
+                    else -> {
+                        buildJsonObject {
+                            putJsonArray("content") {
+                                addJsonObject {
+                                    put("type", "text")
+                                    put("text", "Неизвестное действие: $action. Доступные: save, get, search, search_by_tags, list, stats, delete")
+                                }
+                            }
+                            put("isError", true)
+                        }
+                    }
+                }
+                result
+            } catch (e: Exception) {
+                buildJsonObject {
+                    putJsonArray("content") {
+                        addJsonObject {
+                            put("type", "text")
+                            put("text", "Ошибка при работе с сохранением информации: ${e.message}")
+                        }
+                    }
+                    put("isError", true)
+                }
+            }
+        }
+        
         else -> {
             buildJsonObject {
                 putJsonArray("content") {

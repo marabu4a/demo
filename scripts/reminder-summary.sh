@@ -9,3 +9,4 @@ cd "$(dirname "$0")/.." || exit 1
 # Запускаем cron-агента
 ./gradlew :server:runCronSummary >> ~/reminder-summary.log 2>&1
 
+

@@ -28,6 +28,61 @@ class ChatViewModel(
                 checkForSavedHistory()
             }
         }
+        
+        // Автоматически подключаемся к MCP серверам при старте
+        viewModelScope.launch {
+            // Подключение к локальному MCP серверу
+            try {
+                val localServerUrl = "http://localhost:8080/mcp"
+                AppLogger.d(TAG, "Attempting to auto-connect to local MCP server: $localServerUrl")
+                
+                mcpClientManager?.let { manager ->
+                    val connected = manager.connectServer("local", localServerUrl)
+                    if (connected) {
+                        val updatedServers = _mcpServers.value.toMutableList()
+                        val existingIndex = updatedServers.indexOfFirst { it.name == "local" }
+                        if (existingIndex >= 0) {
+                            updatedServers[existingIndex] = McpServerConfig("local", localServerUrl, true)
+                        } else {
+                            updatedServers.add(McpServerConfig("local", localServerUrl, true))
+                        }
+                        _mcpServers.value = updatedServers
+                        AppLogger.i(TAG, "Auto-connected to local MCP server")
+                    } else {
+                        AppLogger.w(TAG, "Failed to auto-connect to local MCP server (server may not be running)")
+                    }
+                }
+            } catch (e: Exception) {
+                AppLogger.w(TAG, "Error during auto-connect to local MCP server: ${e.message}")
+                // Не критично, продолжаем работу
+            }
+            
+            // Подключение к удаленному MCP серверу fetch
+            try {
+                val remoteFetchServerUrl = "https://remote.mcpservers.org/fetch/mcp"
+                AppLogger.d(TAG, "Attempting to auto-connect to remote fetch MCP server: $remoteFetchServerUrl")
+                
+                mcpClientManager?.let { manager ->
+                    val connected = manager.connectServer("remote_fetch", remoteFetchServerUrl)
+                    if (connected) {
+                        val updatedServers = _mcpServers.value.toMutableList()
+                        val existingIndex = updatedServers.indexOfFirst { it.name == "remote_fetch" }
+                        if (existingIndex >= 0) {
+                            updatedServers[existingIndex] = McpServerConfig("remote_fetch", remoteFetchServerUrl, true)
+                        } else {
+                            updatedServers.add(McpServerConfig("remote_fetch", remoteFetchServerUrl, true))
+                        }
+                        _mcpServers.value = updatedServers
+                        AppLogger.i(TAG, "Auto-connected to remote fetch MCP server")
+                    } else {
+                        AppLogger.w(TAG, "Failed to auto-connect to remote fetch MCP server (server may be unavailable)")
+                    }
+                }
+            } catch (e: Exception) {
+                AppLogger.w(TAG, "Error during auto-connect to remote fetch MCP server: ${e.message}")
+                // Не критично, продолжаем работу
+            }
+        }
     }
     
     private val _session = mutableStateOf(ChatSession())
@@ -311,12 +366,16 @@ class ChatViewModel(
                 // Проверяем, нужно ли вызвать MCP инструменты перед отправкой к AI
                 val mcpToolResults = checkAndCallMcpTools(text)
                 
+                // Получаем информацию о доступных MCP инструментах для системного промпта
+                val availableMcpTools = getAvailableMcpToolsInfo()
+                
                 // Формируем список сообщений для отправки:
                 // 1. Загруженная история (если есть) - не показывается в UI
                 // 2. Если есть summary, добавляем его как системное сообщение
-                // 3. Результаты MCP инструментов (если были вызваны)
-                // 4. Исключаем сообщения пользователя, которые уже сжаты в summary
-                // 5. Добавляем остальные сообщения (ответы AI и новые сообщения пользователя)
+                // 3. Информация о доступных MCP инструментах (системный промпт)
+                // 4. Результаты MCP инструментов (если были вызваны)
+                // 5. Исключаем сообщения пользователя, которые уже сжаты в summary
+                // 6. Добавляем остальные сообщения (ответы AI и новые сообщения пользователя)
                 val messagesToSend = buildList {
                     // Добавляем загруженную историю в начало (если есть)
                     _loadedHistory?.let { loaded ->
@@ -330,6 +389,17 @@ class ChatViewModel(
                             content = compressed.summary,
                             role = MessageRole.SYSTEM
                         ))
+                    }
+                    
+                    // Добавляем полный system prompt с инструкциями по использованию MCP инструментов
+                    val systemPrompt = generateSystemPromptWithMcpTools()
+                    if (systemPrompt.isNotEmpty()) {
+                        add(Message(
+                            id = generateId(),
+                            content = systemPrompt,
+                            role = MessageRole.SYSTEM
+                        ))
+                        AppLogger.d(TAG, "Added comprehensive system prompt with MCP tools instructions")
                     }
                     
                     // Добавляем результаты MCP инструментов как системные сообщения
@@ -995,6 +1065,218 @@ class ChatViewModel(
     }
     
     /**
+     * Получает информацию о всех доступных MCP инструментах со всех подключенных серверов
+     * Возвращает карту: имя сервера -> список инструментов
+     */
+    private suspend fun getAvailableMcpToolsInfo(): Map<String, List<org.example.demo.chat.McpTool>> {
+        val toolsInfo = mutableMapOf<String, List<org.example.demo.chat.McpTool>>()
+        
+        if (mcpClientManager == null) {
+            return toolsInfo
+        }
+        
+        val servers = mcpClientManager.getConnectedServers()
+        for (serverName in servers) {
+            try {
+                val tools = getMcpTools(serverName)
+                if (tools.isNotEmpty()) {
+                    toolsInfo[serverName] = tools
+                }
+            } catch (e: Exception) {
+                AppLogger.w(TAG, "Failed to get tools from server $serverName: ${e.message}")
+            }
+        }
+        
+        return toolsInfo
+    }
+    
+    /**
+     * Генерирует полный system prompt для GigaChat с инструкциями по использованию MCP инструментов
+     */
+    private suspend fun generateSystemPromptWithMcpTools(): String {
+        val availableTools = getAvailableMcpToolsInfo()
+        
+        if (availableTools.isEmpty()) {
+            return """Ты - полезный AI ассистент. Помогай пользователю с вопросами и задачами.
+            
+Если тебе нужна дополнительная информация из внешних источников, сообщи пользователю об этом, и система автоматически получит необходимые данные."""
+        }
+        
+        val prompt = buildString {
+            append("""Ты - полезный AI ассистент с доступом к MCP (Model Context Protocol) инструментам для получения контекста и выполнения действий.
+
+## Доступные MCP инструменты:
+
+""")
+            
+            // Описываем каждый сервер и его инструменты
+            availableTools.forEach { (serverName, tools) ->
+                append("### Сервер: $serverName\n\n")
+                tools.forEach { tool ->
+                    append("**${tool.name}**")
+                    if (tool.description != null && tool.description.isNotBlank()) {
+                        append(": ${tool.description}")
+                    }
+                    append("\n")
+                    
+                    // Добавляем информацию о параметрах, если есть
+                    tool.inputSchema?.let { schema ->
+                        schema.jsonObject["properties"]?.jsonObject?.let { properties ->
+                            if (properties.isNotEmpty()) {
+                                append("  Параметры:\n")
+                                properties.forEach { (paramName, paramInfo) ->
+                                    val paramObj = paramInfo.jsonObject
+                                    val paramType = paramObj["type"]?.jsonPrimitive?.content ?: "string"
+                                    val paramDesc = paramObj["description"]?.jsonPrimitive?.content
+                                    val isRequired = schema.jsonObject["required"]?.jsonArray?.any { 
+                                        it.jsonPrimitive.content == paramName 
+                                    } ?: false
+                                    
+                                    append("    - $paramName ($paramType)")
+                                    if (paramDesc != null) {
+                                        append(": $paramDesc")
+                                    }
+                                    if (isRequired) {
+                                        append(" [обязательный]")
+                                    }
+                                    append("\n")
+                                }
+                            }
+                        }
+                    }
+                    append("\n")
+                }
+                append("\n")
+            }
+            
+            append("""## Как использовать MCP инструменты:
+
+### Важные принципы:
+
+1. **Автоматический вызов**: Система автоматически вызывает инструменты при обнаружении соответствующих запросов пользователя. Тебе не нужно явно просить об этом.
+
+2. **Запрос контекста**: Если тебе нужна информация, которую можно получить через MCP инструменты, просто упомяни об этом в своем ответе. Система автоматически определит необходимость и вызовет соответствующий инструмент.
+
+3. **Использование результатов**: Когда система вызывает инструмент и получает результат, он будет добавлен в контекст как системное сообщение. Используй эту информацию для ответа пользователю.
+
+### Примеры использования:
+
+**Пример 1: Получение информации с сайта**
+- Пользователь: "Расскажи о содержимом сайта https://example.com"
+- Система автоматически вызовет инструмент `fetch` с URL
+- Ты получишь содержимое сайта в контексте
+- Используй эту информацию для ответа
+
+**Пример 2: Сохранение информации**
+- Пользователь: "Сохрани эту информацию: важные данные"
+- Система автоматически вызовет инструмент `save_info`
+- Ты получишь подтверждение сохранения
+- Сообщи пользователю об успешном сохранении
+
+**Пример 3: Создание напоминания**
+- Пользователь: "Напомни мне завтра в 10:00 о встрече"
+- Система автоматически вызовет инструмент `reminder`
+- Ты получишь подтверждение создания напоминания
+- Сообщи пользователю об успешном создании
+
+**Пример 4: Комплексный запрос**
+- Пользователь: "Получи информацию с сайта X и сохрани её"
+- Система автоматически вызовет сначала `fetch`, затем `save_info`
+- Ты получишь оба результата в контексте
+- Используй оба результата для формирования ответа
+
+### Когда запрашивать использование инструментов:
+
+1. **fetch**: Когда пользователь просит получить информацию с веб-сайта, прочитать страницу, узнать содержимое сайта. Просто упомяни URL или попроси получить информацию - система автоматически вызовет инструмент.
+
+2. **save_info**: Когда пользователь просит сохранить, запомнить информацию или добавить в базу знаний. Просто подтверди, что информация будет сохранена - система автоматически вызовет инструмент.
+
+3. **reminder**: Когда пользователь просит создать напоминание, напомнить о чем-то. Просто подтверди создание напоминания - система автоматически вызовет инструмент.
+
+4. **yandex_tracker**: Когда пользователь спрашивает о задачах в трекере, просит создать задачу или получить информацию о задачах. Система автоматически вызовет инструмент при обнаружении соответствующих запросов.
+
+### Важно:
+
+- **Не нужно явно просить систему вызвать инструмент** - система делает это автоматически
+- **Используй результаты инструментов**, которые уже есть в контексте
+- **Если нужна информация, которую можно получить через инструмент**, просто упомяни об этом естественным образом
+- **Всегда используй полученную информацию** для формирования полного и полезного ответа
+
+## Твоя задача:
+
+1. Анализируй запросы пользователя
+2. Используй информацию из результатов MCP инструментов (если она есть в контексте)
+3. Формируй полные, полезные и точные ответы
+4. Если нужна дополнительная информация, упомяни об этом - система автоматически получит её
+
+Помни: MCP инструменты вызываются автоматически системой. Твоя задача - использовать полученные результаты для помощи пользователю.""")
+        }
+        
+        return prompt.toString()
+    }
+    
+    /**
+     * Генерирует summary текста через GigaChat API
+     */
+    private suspend fun generateSummaryWithGigaChat(text: String, maxLength: Int = 300): String? {
+        return try {
+            val client = apiClientManager.getClient(AiModel.GIGACHAT)
+            
+            // Получаем токен, если нужно
+            if (_accessToken.value.isBlank()) {
+                try {
+                    val gigaChatClient = client as? org.example.demo.chat.GigaChatApiClient
+                    val token = gigaChatClient?.getAccessToken() ?: ""
+                    if (token.isNotBlank()) {
+                        setAccessToken(token)
+                    } else {
+                        AppLogger.w(TAG, "Could not get GigaChat access token for summary generation")
+                        return null
+                    }
+                } catch (e: Exception) {
+                    AppLogger.w(TAG, "Failed to get access token for summary: ${e.message}")
+                    return null
+                }
+            }
+            
+            val prompt = """
+                Создай краткую сводку следующего текста.
+                Требования:
+                - Максимальная длина: $maxLength символов
+                - Сохрани основные идеи и ключевые моменты
+                - Будь точным и информативным
+                - Используй ясный и понятный язык
+                - Выдели главные тезисы
+                
+                Текст:
+                ${text.take(5000)}${if (text.length > 5000) "\n\n[Текст обрезан для обработки]" else ""}
+            """.trimIndent()
+            
+            val summary = client.sendMessage(
+                messages = listOf(
+                    Message(
+                        id = generateId(),
+                        content = prompt,
+                        role = MessageRole.USER
+                    )
+                ),
+                temperature = 0.3f, // Низкая температура для более точных summary
+                maxTokens = null
+            )
+            
+            // Обрезаем до maxLength если нужно
+            if (summary.length > maxLength) {
+                summary.take(maxLength) + "..."
+            } else {
+                summary
+            }
+        } catch (e: Exception) {
+            AppLogger.e(TAG, "Error generating summary with GigaChat: ${e.message}", e)
+            null
+        }
+    }
+    
+    /**
      * Проверяет запрос пользователя и автоматически вызывает соответствующие MCP инструменты
      * Возвращает карту результатов: имя инструмента -> результат
      */
@@ -1007,8 +1289,227 @@ class ChatViewModel(
         }
         
         val lowerMessage = userMessage.lowercase()
+        val serversToCheck = mcpClientManager?.getConnectedServers() ?: emptyList()
         
-        // Проверяем упоминания трекера/задач
+        if (serversToCheck.isEmpty()) {
+            AppLogger.d(TAG, "No MCP servers connected")
+            return results
+        }
+        
+        AppLogger.d(TAG, "Checking MCP tools for message. Connected servers: ${serversToCheck.joinToString()}")
+        
+        // 1. Проверяем запросы на сохранение информации (save_info)
+        val saveInfoKeywords = listOf(
+            "сохрани", "сохранить", "запомни", "запомнить", "добавь в базу", 
+            "сохрани информацию", "запомни это", "сохрани для будущего"
+        )
+        val hasSaveInfoRequest = saveInfoKeywords.any { keyword ->
+            lowerMessage.contains(keyword, ignoreCase = true)
+        }
+        
+        if (hasSaveInfoRequest) {
+            AppLogger.d(TAG, "Detected save_info request, checking for MCP servers...")
+            for (serverName in serversToCheck) {
+                try {
+                    val tools = getMcpTools(serverName)
+                    val saveInfoTool = tools.find { it.name == "save_info" }
+                    
+                    if (saveInfoTool != null) {
+                        AppLogger.d(TAG, "Found save_info tool on server: $serverName")
+                        
+                        // Извлекаем информацию для сохранения
+                        val titleMatch = Regex("(?:название|title)[\\s:]+(.+)", RegexOption.IGNORE_CASE).find(userMessage)
+                        val title = titleMatch?.groupValues?.get(1)?.trim() ?: "Сохраненная информация"
+                        
+                        // Пытаемся извлечь контент (весь текст после ключевых слов)
+                        val contentStart = saveInfoKeywords.mapNotNull { keyword ->
+                            val index = lowerMessage.indexOf(keyword)
+                            if (index >= 0) index + keyword.length else null
+                        }.minOrNull() ?: 0
+                        val content = userMessage.substring(contentStart).trim()
+                        
+                        val result = callMcpTool(
+                            serverName = serverName,
+                            toolName = "save_info",
+                            arguments = buildJsonObject {
+                                put("action", "save")
+                                put("title", title)
+                                put("content", if (content.isNotEmpty()) content else userMessage)
+                                putJsonArray("tags") {
+                                    // Извлекаем теги из сообщения, если есть
+                                    val tagMatch = Regex("(?:тег|tag)[\\s:]+([^\\s,]+)", RegexOption.IGNORE_CASE).find(userMessage)
+                                    if (tagMatch != null) {
+                                        add(tagMatch.groupValues[1])
+                                    }
+                                }
+                            }
+                        )
+                        
+                        if (result != null && !result.startsWith("Ошибка")) {
+                            results["save_info"] = result
+                            break
+                        }
+                    }
+                } catch (e: Exception) {
+                    AppLogger.e(TAG, "Error checking save_info tool on server $serverName: ${e.message}", e)
+                }
+            }
+        }
+        
+        // 2. Проверяем запросы на напоминания (reminder)
+        val reminderKeywords = listOf(
+            "напомни", "напомнить", "напоминание", "reminder",
+            "напомни мне", "создай напоминание", "добавь напоминание"
+        )
+        val hasReminderRequest = reminderKeywords.any { keyword ->
+            lowerMessage.contains(keyword, ignoreCase = true)
+        }
+        
+        if (hasReminderRequest) {
+            AppLogger.d(TAG, "Detected reminder request, checking for MCP servers...")
+            for (serverName in serversToCheck) {
+                try {
+                    val tools = getMcpTools(serverName)
+                    val reminderTool = tools.find { it.name == "reminder" }
+                    
+                    if (reminderTool != null) {
+                        AppLogger.d(TAG, "Found reminder tool on server: $serverName")
+                        
+                        // Извлекаем информацию о напоминании
+                        val titleMatch = Regex("(?:напомни|напомнить|о)[\\s:]+(.+)", RegexOption.IGNORE_CASE).find(userMessage)
+                        val title = titleMatch?.groupValues?.get(1)?.trim() ?: "Напоминание"
+                        
+                        // Пытаемся найти дату/время
+                        val dateMatch = Regex("(?:завтра|послезавтра|через|в|в\\s+\\d+)", RegexOption.IGNORE_CASE).find(userMessage)
+                        
+                        val result = callMcpTool(
+                            serverName = serverName,
+                            toolName = "reminder",
+                            arguments = buildJsonObject {
+                                put("action", "create")
+                                put("title", title)
+                                put("description", userMessage)
+                                if (dateMatch != null) {
+                                    put("dueDate", dateMatch.value) // Упрощенная версия
+                                }
+                                put("priority", "medium")
+                            }
+                        )
+                        
+                        if (result != null && !result.startsWith("Ошибка")) {
+                            results["reminder"] = result
+                            break
+                        }
+                    }
+                } catch (e: Exception) {
+                    AppLogger.e(TAG, "Error checking reminder tool on server $serverName: ${e.message}", e)
+                }
+            }
+        }
+        
+        // 3. Проверяем запросы на получение содержимого сайта (fetch)
+        val fetchKeywords = listOf(
+            "получи", "получить", "прочитай", "прочитать", "содержимое", "контент",
+            "расскажи о сайте", "что на сайте", "информация с сайта", "fetch",
+            "получи информацию", "прочитай сайт", "контент сайта", "содержимое сайта"
+        )
+        val urlPattern = Regex("https?://[^\\s]+", RegexOption.IGNORE_CASE)
+        val hasUrl = urlPattern.containsMatchIn(userMessage)
+        val hasFetchRequest = (fetchKeywords.any { keyword ->
+            lowerMessage.contains(keyword, ignoreCase = true)
+        } && hasUrl) || hasUrl // Если есть URL, даже без ключевых слов, пытаемся fetch
+        
+        if (hasFetchRequest) {
+            AppLogger.d(TAG, "Detected fetch request, checking for MCP servers...")
+            val urlMatch = urlPattern.find(userMessage)
+            val url = urlMatch?.value
+            
+            if (url != null) {
+                // Сначала пытаемся найти удаленный MCP сервер fetch (remote_fetch)
+                // Затем проверяем другие серверы
+                val preferredServers = listOf("remote_fetch") + serversToCheck.filter { it != "remote_fetch" }
+                
+                for (serverName in preferredServers) {
+                    if (!serversToCheck.contains(serverName)) continue
+                    
+                    try {
+                        val tools = getMcpTools(serverName)
+                        val fetchTool = tools.find { it.name == "fetch" }
+                        
+                        if (fetchTool != null) {
+                            AppLogger.d(TAG, "Found fetch tool on server: $serverName")
+                            
+                            val fetchResult = callMcpTool(
+                                serverName = serverName,
+                                toolName = "fetch",
+                                arguments = buildJsonObject {
+                                    put("url", url)
+                                }
+                            )
+                            
+                            if (fetchResult != null && !fetchResult.startsWith("Ошибка")) {
+                                results["fetch"] = fetchResult
+                                AppLogger.i(TAG, "Successfully fetched content from URL: $url")
+                                
+                                // Автоматически создаем summary через GigaChat и сохраняем
+                                try {
+                                    val summary = generateSummaryWithGigaChat(fetchResult)
+                                    if (summary != null) {
+                                        AppLogger.d(TAG, "Generated summary with GigaChat: ${summary.take(100)}...")
+                                        
+                                        // Сохраняем информацию с summary через локальный MCP сервер
+                                        val localServerName = serversToCheck.find { it == "local" }
+                                        if (localServerName != null) {
+                                            val localTools = getMcpTools(localServerName)
+                                            val saveInfoTool = localTools.find { it.name == "save_info" }
+                                            
+                                            if (saveInfoTool != null) {
+                                                AppLogger.d(TAG, "Auto-saving fetched content with summary to local server")
+                                                
+                                                val saveResult = callMcpTool(
+                                                    serverName = localServerName,
+                                                    toolName = "save_info",
+                                                    arguments = buildJsonObject {
+                                                        put("action", "save")
+                                                        put("title", "Информация с сайта: ${url.take(100)}")
+                                                        put("content", fetchResult)
+                                                        put("source", url)
+                                                        put("summary", summary)
+                                                        putJsonArray("tags") {
+                                                            add("website")
+                                                            add("fetch")
+                                                            add("auto-saved")
+                                                        }
+                                                    }
+                                                )
+                                                
+                                                if (saveResult != null && !saveResult.startsWith("Ошибка")) {
+                                                    results["save_info"] = saveResult
+                                                    AppLogger.i(TAG, "Successfully auto-saved fetched content with summary")
+                                                } else {
+                                                    AppLogger.w(TAG, "Failed to auto-save fetched content: $saveResult")
+                                                }
+                                            }
+                                        }
+                                    }
+                                } catch (e: Exception) {
+                                    AppLogger.e(TAG, "Error generating summary or saving: ${e.message}", e)
+                                    // Продолжаем работу даже если summary/save не удалось
+                                }
+                                
+                                break
+                            } else {
+                                AppLogger.w(TAG, "Failed to fetch content from $url via server $serverName: $fetchResult")
+                            }
+                        }
+                    } catch (e: Exception) {
+                        AppLogger.e(TAG, "Error checking fetch tool on server $serverName: ${e.message}", e)
+                    }
+                }
+            }
+        }
+        
+        // 4. Проверяем упоминания трекера/задач (существующая логика)
         val trackerKeywords = listOf(
             "трекер", "задач", "таск", "issue", "yandex tracker",
             "сколько задач", "открытые задачи", "список задач",
@@ -1021,10 +1522,6 @@ class ChatViewModel(
         
         if (hasTrackerMention) {
             AppLogger.d(TAG, "Detected tracker-related query, checking for MCP servers...")
-            
-            // Ищем подключенные MCP серверы через менеджер
-            val serversToCheck = mcpClientManager?.getConnectedServers() ?: emptyList()
-            AppLogger.d(TAG, "Connected MCP servers: ${serversToCheck.joinToString()}")
             
             // Пытаемся найти сервер с инструментом yandex_tracker
             var foundServer = false
